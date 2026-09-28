@@ -1,0 +1,156 @@
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = [
+    "setuptools>=68.0.0",
+    "wheel>=0.40.0",
+]
+
+[project]
+name = "taiga-metrics"
+version = "0.1.0"
+description = "Flow and team metrics for self-hosted Taiga, read directly from its database"
+authors = [
+    {name = "Daniil Gruzdev", email = "gruzdev.daniil@gmail.com"}
+]
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+keywords = ["taiga", "metrics", "kanban", "scrum", "lead-time", "cycle-time", "cfd"]
+
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Topic :: Software Development :: Bug Tracking",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Typing :: Typed",
+]
+
+dependencies = [
+    "alembic>=1.20.0",
+    "asyncpg>=0.31.0",
+    "fastapi>=0.141.1",
+    "httpx>=0.28.1",
+    "pydantic-settings>=2.15.0",
+    "sqlalchemy[asyncio]>=2.1.0",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.1.0",
+    "mypy>=1.8.0",
+    "ruff>=0.3.0",
+    "pre-commit>=3.6.0",
+    "httpx2>=2.13.1",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["taiga_metrics*"]
+
+[tool.setuptools.package-data]
+taiga_metrics = ["py.typed", "migrations/script.py.mako"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+files = ["taiga_metrics", "scripts", "tests"]
+plugins = ["pydantic.mypy"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 99
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "W",
+    "F",
+    "I",
+    "B",
+    "C4",
+    "UP",
+    "RET",
+    "SIM",
+    "PL",
+    "RUF",
+    "ERA",
+    "TC",
+]
+ignore = [
+    "E501",
+    "B008",
+    "C901",
+    "PLR0913",
+    "PLR2004",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+"taiga_metrics/api/*.py" = ["TC001", "TC002", "TC003"]
+"tests/**/*.py" = [
+    "S101",
+    "PLR2004",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["taiga_metrics"]
+required-imports = ["from __future__ import annotations"]
+combine-as-imports = true
+split-on-trailing-comma = true
+
+[tool.ruff.lint.flake8-type-checking]
+strict = true
+runtime-evaluated-base-classes = [
+    "pydantic.BaseModel",
+    "pydantic_settings.BaseSettings",
+]
+runtime-evaluated-decorators = ["dataclasses.dataclass"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--verbose",
+    "--strict-markers",
+    "--strict-config",
+    "--tb=short",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["taiga_metrics"]
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/__pycache__/*",
+    "*/.*/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]

@@ -1,0 +1,56 @@
+x-taiga-metrics-environment: &taiga-metrics-environment
+  TAIGA_METRICS_TAIGA_DB_HOST: ${TAIGA_METRICS_TAIGA_DB_HOST:?set TAIGA_METRICS_TAIGA_DB_HOST}
+  TAIGA_METRICS_TAIGA_DB_PORT: ${TAIGA_METRICS_TAIGA_DB_PORT:-5432}
+  TAIGA_METRICS_TAIGA_DB_NAME: ${TAIGA_METRICS_TAIGA_DB_NAME:-taiga}
+  TAIGA_METRICS_TAIGA_DB_USER: ${TAIGA_METRICS_TAIGA_DB_USER:?set TAIGA_METRICS_TAIGA_DB_USER}
+  TAIGA_METRICS_TAIGA_DB_PASSWORD: ${TAIGA_METRICS_TAIGA_DB_PASSWORD:?set TAIGA_METRICS_TAIGA_DB_PASSWORD}
+  TAIGA_METRICS_DB_HOST: taiga-metrics-db
+  TAIGA_METRICS_DB_NAME: taiga_metrics
+  TAIGA_METRICS_DB_USER: taiga_metrics
+  TAIGA_METRICS_DB_PASSWORD: ${TAIGA_METRICS_DB_PASSWORD:-taiga_metrics}
+  TAIGA_METRICS_TAIGA_URL: ${TAIGA_METRICS_TAIGA_URL:?set TAIGA_METRICS_TAIGA_URL}
+  TAIGA_METRICS_TAIGA_API_URL: ${TAIGA_METRICS_TAIGA_API_URL:-${TAIGA_METRICS_TAIGA_URL}/api/v1}
+  TAIGA_METRICS_SYNC_INTERVAL_SECONDS: ${TAIGA_METRICS_SYNC_INTERVAL_SECONDS:-3600}
+
+services:
+  taiga-metrics:
+    image: ${TAIGA_METRICS_IMAGE:-ghcr.io/dvsawr/taiga-metrics-extension:${TAIGA_METRICS_VERSION:-latest}}
+    environment:
+      <<: *taiga-metrics-environment
+      TAIGA_METRICS_MEDIA_DIR: /taiga-media
+    volumes:
+      - ${TAIGA_METRICS_MEDIA_PATH:-./taiga-media}:/taiga-media:ro
+    ports:
+      - "${TAIGA_METRICS_BIND:-0.0.0.0}:${TAIGA_METRICS_PORT:-9100}:8000"
+    depends_on:
+      taiga-metrics-db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  taiga-metrics-worker:
+    image: ${TAIGA_METRICS_IMAGE:-ghcr.io/dvsawr/taiga-metrics-extension:${TAIGA_METRICS_VERSION:-latest}}
+    command: ["python", "-m", "taiga_metrics", "worker"]
+    environment: *taiga-metrics-environment
+    depends_on:
+      taiga-metrics-db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  taiga-metrics-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: taiga_metrics
+      POSTGRES_USER: taiga_metrics
+      POSTGRES_PASSWORD: ${TAIGA_METRICS_DB_PASSWORD:-taiga_metrics}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U taiga_metrics -d taiga_metrics"]
+      interval: 2s
+      timeout: 15s
+      retries: 5
+      start_period: 3s
+    volumes:
+      - taiga-metrics-db-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  taiga-metrics-db-data:
