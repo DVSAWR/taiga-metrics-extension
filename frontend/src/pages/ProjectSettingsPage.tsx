@@ -10,9 +10,10 @@ import {
   type Scope,
 } from "../api";
 import { SectionHeader } from "../components/SectionHeader";
+import { Dropdown } from "../components/Dropdown";
 import { SettingsTabs } from "../components/SettingsTabs";
 import type { ProjectSettingsTab } from "../router";
-import { CalendarSection } from "./CalendarSection";
+import { ReportingSection } from "./ReportingSection";
 import { ColumnsSection } from "./ColumnsSection";
 import { NotFoundPage } from "./HomePage";
 import { StatusSection } from "./StatusPage";
@@ -35,8 +36,12 @@ export function ProjectSettingsPage({
     <>
       <SettingsTabs active={tab} project={project ?? null} />
       {tab === "access" && <AccessSection slug={slug} projectName={project?.name ?? slug} />}
-      {tab === "general" && <ColumnsSection slug={slug} />}
-      {tab === "calendar" && <CalendarSection slug={slug} />}
+      {tab === "general" && (
+        <>
+          <ColumnsSection slug={slug} />
+          <ReportingSection slug={slug} />
+        </>
+      )}
       {tab === "status" && <StatusSection slug={slug} />}
       {tab === "sync" && <SyncSection slug={slug} />}
     </>
@@ -158,15 +163,16 @@ function AccessSection({ slug, projectName }: { slug: string; projectName: strin
                     </td>
                   ))}
                   <td>
-                    <select
+                    <Dropdown
                       className="select"
                       value={role.scope}
-                      onChange={(event) => setScope(role, event.target.value as Scope)}
-                      aria-label={`Cards visible to ${role.name}`}
-                    >
-                      <option value="all">All cards</option>
-                      <option value="own">Only their own</option>
-                    </select>
+                      onChange={(value) => setScope(role, value as Scope)}
+                      label={`Cards visible to ${role.name}`}
+                      options={[
+                        { value: "all", label: "All cards" },
+                        { value: "own", label: "Only their own" },
+                      ]}
+                    />
                   </td>
                 </tr>
               ))}
@@ -175,8 +181,7 @@ function AccessSection({ slug, projectName }: { slug: string; projectName: strin
         </section>
       )}
       <p className="muted section">
-        "Only their own" limits Flow metrics and Search to cards the member is currently assigned
-        to.
+        "Only their own" limits every section to cards the member is currently assigned to.
       </p>
     </>
   );

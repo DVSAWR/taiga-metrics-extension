@@ -22,8 +22,8 @@ def test_status_is_served_to_project_managers(client: TestClient, admin: TestCli
 
 
 def test_status_is_hidden_from_members(member: TestClient) -> None:
-    """Members without management rights do not even see that it exists."""
-    assert member.get("/api/projects/alpha/status").status_code == 404
+    """Members without management rights are refused."""
+    assert member.get("/api/projects/alpha/status").status_code == 403
 
 
 def test_report_is_healthy_only_when_everything_is() -> None:

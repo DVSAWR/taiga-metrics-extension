@@ -2,28 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-
-from tests.fakes import FakeTeam
 
 if TYPE_CHECKING:
     from fastapi.testclient import TestClient
-
-    from taiga_metrics.api.app import Services
-
-
-def test_members_of_known_project(client: TestClient) -> None:
-    """Members come with role and flags."""
-    members = client.get("/api/projects/alpha/members").json()
-    assert [(m["username"], m["role"], m["is_owner"]) for m in members] == [
-        ("qwer", "Product Owner", True)
-    ]
-
-
-def test_members_of_unknown_project(client: TestClient) -> None:
-    """Unknown projects are a 404."""
-    assert client.get("/api/projects/nope/members").status_code == 404
 
 
 def test_cards_are_searched_by_text_and_type(client: TestClient) -> None:
@@ -101,35 +83,3 @@ def test_sprints_are_listed_with_their_dates(client: TestClient) -> None:
             "closed": False,
         }
     ]
-
-
-def test_team_stats_are_taigas_counts(client: TestClient, member: TestClient) -> None:
-    """Taiga's five metrics, then the extension's five; members need the Team page."""
-    stats = client.get("/api/projects/alpha/team-stats").json()
-    titles = [(metric["source"], metric["title"]) for metric in stats["metrics"]]
-    assert titles == [
-        ("taiga", "Mr. Wolf"),
-        ("taiga", "Iocaine Drinker"),
-        ("taiga", "Cervantes"),
-        ("taiga", "Bug Hunter"),
-        ("taiga", "Night Shift"),
-        ("extension", "Storyteller"),
-        ("extension", "Workhorse"),
-        ("extension", "Traveler"),
-        ("extension", "Chatterbox"),
-        ("extension", "Doombringer"),
-    ]
-    assert [metric["weight"] for metric in stats["metrics"]][-1] == -1
-    assert stats["values"]["closed_tasks"] == {"6": 4}
-    assert member.get("/api/projects/alpha/team-stats").status_code == 404
-
-
-def test_team_stats_follow_the_period(client: TestClient, services: Services) -> None:
-    """The days asked for become the period of every count."""
-    client.get("/api/projects/alpha/team-stats", params={"from": "2026-09-01", "to": "2026-09-30"})
-    team = services.team
-    assert isinstance(team, FakeTeam)
-    assert team.periods[-1] == (
-        datetime(2026, 9, 1, tzinfo=UTC),
-        datetime(2026, 10, 1, tzinfo=UTC),
-    )

@@ -15,6 +15,7 @@ import {
   type PeriodStatusTimes,
   type PeriodFinished,
   type PeriodStays,
+  type Period,
   type ProjectSummary,
   type ScrumScope,
   type SpreadStats,
@@ -28,29 +29,23 @@ import { TotalChart, type TotalPart } from "../charts/TotalChart";
 import { TREND_BAD, TREND_FLAT, TREND_GOOD } from "../charts/timeAxis";
 import { CardTitle } from "../components/CardTitle";
 import { Dropdown } from "../components/Dropdown";
-import { FilterButton, FilterPanel } from "../components/FilterPanel";
+import { useExclusiveMetricList } from "../components/MetricPopup";
 import { PeopleRefs, PersonRef } from "../components/PersonLink";
 import { Segmented } from "../components/Segmented";
-import { SidePanel } from "../components/SidePanel";
-import { useFilterSelection, useFiltersOpen, usePeriod } from "../filterState";
+import { SortTitle, sortRows, useSort } from "../components/SortTitle";
 import { formatDateTime, formatNumber } from "../format";
 import { MODULE_OF_TYPE, TYPE_LABELS } from "../modules";
-import { cardPath, columnPath, navigate, openInNewTab, scrumPath } from "../router";
+import { cardPath, columnPath, openInNewTab } from "../router";
 import { TextLink } from "../components/TextLink";
 import { Empty, MetricCard } from "./FlowMetrics";
-import { NotFoundPage } from "./HomePage";
 import { projectTypes } from "./KanbanPage";
 
 type Metric = "p50" | "p75" | "p90" | "mean" | "sum" | "n";
-type Scale = "shared" | "row";
 type TotalKind = "lead" | "cycle";
 
 interface Settings {
   by: PeriodKind;
-  from: string | null;
-  to: string | null;
   metric: Metric;
-  scale: Scale;
   few: number;
   change: number;
   pass: number;
@@ -75,10 +70,9 @@ const KINDS: { value: PeriodKind; label: string }[] = [
   { value: "sprint", label: "Sprints" },
 ];
 
-const SCALES: { value: Scale; label: string }[] = [
-  { value: "shared", label: "Shared scale" },
-  { value: "row", label: "Per row" },
-];
+function kindsOf(hasSprints: boolean): { value: PeriodKind; label: string }[] {
+  return KINDS.filter((kind) => kind.value !== "sprint" || hasSprints);
+}
 
 const TOTAL_KINDS: { value: TotalKind; label: string }[] = [
   { value: "lead", label: "Lead time" },
@@ -87,40 +81,34 @@ const TOTAL_KINDS: { value: TotalKind; label: string }[] = [
 
 const GROUPS: { key: string; label: string; types: (string | null)[] }[] = [
   { key: "waiting", label: "Waiting", types: ["queue"] },
-  { key: "work", label: "Work", types: ["work", "rework"] },
+  { key: "work", label: "Work", types: ["work"] },
   { key: "done", label: "Done", types: ["done", "cancelled"] },
   { key: "none", label: "Type not set", types: [null] },
 ];
 
 const OUTSIDE = "outside";
 const SCRUM_TYPES: ItemType[] = ["epic", "userstory", "task", "issue"];
-const FILL = "0, 138, 168";
-const FILL_LOW = 0.06;
-const FILL_RANGE = 0.5;
 const FLAT = TREND_FLAT;
 const FLAT_TEXT = "#70728f";
 const TREND_PERIODS = 12;
 const MIN_FEW = 1;
 const MIN_CHANGE = 5;
-const TABLE_KEYS: (keyof Settings)[] = ["metric", "scale", "few", "change", "pass", "closed"];
+const TABLE_KEYS: (keyof Settings)[] = ["metric", "few", "change", "pass", "closed"];
 
-function defaults(hasSprints: boolean): Settings {
+function defaults(): Settings {
   return {
-    by: hasSprints ? "sprint" : "week",
-    from: null,
-    to: null,
+    by: "sprint",
     metric: "p50",
-    scale: "shared",
     few: 3,
     change: 25,
     pass: 5,
     closed: ["done"],
     total: "lead",
-    last: 8,
+    last: 10,
   };
 }
 
-function readSettings(base: Settings): Settings {
+function readSettings(base: Settings, hasSprints: boolean): Settings {
   const query = new URLSearchParams(window.location.search);
   const number = (key: string, fallback: number, least: number) => {
     const value = Number(query.get(key));
@@ -129,11 +117,8 @@ function readSettings(base: Settings): Settings {
   const pick = <T extends string>(key: string, options: { value: T }[], fallback: T): T =>
     options.find((option) => option.value === query.get(key))?.value ?? fallback;
   return {
-    by: pick("by", KINDS, base.by),
-    from: query.get("from") || null,
-    to: query.get("to") || null,
+    by: pick("by", kindsOf(hasSprints), hasSprints ? base.by : "week"),
     metric: pick("metric", METRICS, base.metric),
-    scale: pick("scale", SCALES, base.scale),
     few: number("few", base.few, MIN_FEW),
     change: number("change", base.change, MIN_CHANGE),
     pass: number("pass", base.pass, 0),
@@ -145,22 +130,23 @@ function readSettings(base: Settings): Settings {
   };
 }
 
-function writeUrl(settings: Settings, base: Settings, selection: FilterSelection) {
-  const query = new URLSearchParams();
+function writeUrl(settings: Settings, base: Settings) {
+  const query = new URLSearchParams(window.location.search);
+  query.delete("scale");
   const text = (value: Settings[keyof Settings]) =>
-    Array.isArray(value) ? value.join(",") : value === null ? "" : String(value);
+    Array.isArray(value) ? value.join(",") : String(value);
   (Object.keys(settings) as (keyof Settings)[]).forEach((key) => {
     if (text(settings[key]) !== text(base[key])) {
       query.set(key, text(settings[key]));
+    } else {
+      query.delete(key);
     }
   });
-  selection.include.forEach((value) => query.append("include", value));
-  selection.exclude.forEach((value) => query.append("exclude", value));
   const search = query.toString();
   window.history.replaceState(
     null,
     "",
-    `${window.location.pathname}${search ? `?${search}` : ""}`,
+    `${window.location.pathname}${search ? `?${search}` : ""}${window.location.hash}`,
   );
 }
 
@@ -258,16 +244,6 @@ function ChangeMark({ change }: { change: Change | null }) {
   );
 }
 
-function fillOf(value: number | null, low: number, high: number): string | undefined {
-  if (value === null || value <= 0 || high <= 0 || !Number.isFinite(low)) {
-    return undefined;
-  }
-  const span = Math.log(high) - Math.log(low);
-  const share = span > 0 ? (Math.log(value) - Math.log(low)) / span : 1;
-  const alpha = FILL_LOW + FILL_RANGE * Math.max(0, Math.min(1, share));
-  return `linear-gradient(rgba(${FILL}, ${alpha}), rgba(${FILL}, ${alpha}))`;
-}
-
 function tooltip(
   stats: SpreadStats | CellStats | undefined,
   period: string,
@@ -318,11 +294,15 @@ function Matrix({
   settings,
   onSettings,
   onOpen,
+  opened,
+  detail,
 }: {
   data: PeriodStatusTimes;
   settings: Settings;
   onSettings: (next: Partial<Settings>) => void;
   onOpen: (opened: Opened) => void;
+  opened: Opened | null;
+  detail: ReactNode;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -370,16 +350,6 @@ function Matrix({
       .filter(hasData);
     return { ...group, rows, head: groupRow(group.key, group.label) };
   }).filter((group) => group.rows.length > 0);
-  const strong = (row: RowData) =>
-    row.values.filter(
-      (value, index): value is number =>
-        index >= offset && value !== null && value > 0 && (row.ns[index] ?? 0) >= settings.few,
-    );
-  const shared = groups.flatMap((group) => group.rows.flatMap(strong));
-  const bounds = (row: RowData): [number, number] => {
-    const pool = settings.scale === "shared" ? shared : strong(row);
-    return [Math.min(...pool, Infinity), Math.max(...pool, 0)];
-  };
   const changeAt = (row: RowData, index: number) => {
     const older = index - 1;
     const period = periods[index];
@@ -399,7 +369,6 @@ function Matrix({
     const value = row.values[index] ?? null;
     const n = row.ns[index] ?? 0;
     const weak = n < settings.few;
-    const [low, high] = bounds(row);
     const waiting = row.status && period.current ? now.get(row.status.status_id) : undefined;
     const unit = row.group ? "cards" : "stays";
     const title = [
@@ -415,16 +384,17 @@ function Matrix({
     return (
       <td
         key={period.key}
-        className={`num scrum-cell${weak ? " weak" : ""}${row.status ? " clickable" : ""}${
-          period.current ? " current" : ""
-        }`}
-        style={{ backgroundImage: !weak && !row.group ? fillOf(value, low, high) : undefined }}
+        className={`num scrum-cell${weak ? " weak" : ""}${
+          row.status && value !== null ? " clickable" : ""
+        }${period.current ? " current" : ""}`}
         title={title || undefined}
         onClick={() =>
           row.status && value !== null && onOpen({ kind: "cell", status: row.status, period })
         }
       >
-        {value !== null && (
+        {value === null ? (
+          <span className="cell-missing">-</span>
+        ) : (
           <>
             <span className="cell-value">{show(value, metric)}</span>
             <span className="cell-n">{n}</span>
@@ -456,44 +426,53 @@ function Matrix({
   };
 
   const line = (row: RowData) => (
-    <tr key={row.key} className={row.group ? "scrum-group-row" : undefined}>
-      <th scope="row" className="sticky-status">
-        {row.group ? (
-          <button
-            type="button"
-            className="scrum-group-toggle"
-            title="Each card's time in the group's statuses added up, then the median over cards"
-            onClick={() => {
-              const key = row.group ?? "";
-              onSettings({
-                closed: settings.closed.includes(key)
-                  ? settings.closed.filter((item) => item !== key)
-                  : [...settings.closed, key],
-              });
-            }}
-          >
-            <span className="scrum-chevron">
-              {settings.closed.includes(row.group) ? "\u25B8" : "\u25BE"}
-            </span>
-            {row.label}
-          </button>
-        ) : (
-          <button
-            type="button"
-            className="legend-link scrum-status"
-            title="Open this status across all periods"
-            onClick={() => row.status && onOpen({ kind: "status", status: row.status })}
-          >
-            {row.label}
-          </button>
-        )}
-      </th>
-      {trendOf(row)}
-      {visible.map((index) => {
-        const period = periods[index];
-        return period ? cellOf(row, index, period) : null;
-      })}
-    </tr>
+    <Fragment key={row.key}>
+      <tr className={row.group ? "scrum-group-row" : undefined}>
+        <th scope="row" className="sticky-status">
+          {row.group ? (
+            <button
+              type="button"
+              className="scrum-group-toggle"
+              title="Each card's time in the group's statuses added up, then the median over cards"
+              onClick={() => {
+                const key = row.group ?? "";
+                onSettings({
+                  closed: settings.closed.includes(key)
+                    ? settings.closed.filter((item) => item !== key)
+                    : [...settings.closed, key],
+                });
+              }}
+            >
+              <span className="scrum-chevron">
+                {settings.closed.includes(row.group) ? "\u25B8" : "\u25BE"}
+              </span>
+              {row.label}
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="legend-link scrum-status"
+              title="Open this status across all periods"
+              onClick={() => row.status && onOpen({ kind: "status", status: row.status })}
+            >
+              {row.label}
+            </button>
+          )}
+        </th>
+        {trendOf(row)}
+        {visible.map((index) => {
+          const period = periods[index];
+          return period ? cellOf(row, index, period) : null;
+        })}
+      </tr>
+      {row.status && opened?.status.status_id === row.status.status_id && (
+        <tr className="expanded-row">
+          <td colSpan={visible.length + 2}>
+            <div className="inline-metric-list">{detail}</div>
+          </td>
+        </tr>
+      )}
+    </Fragment>
   );
 
   if (periods.length === 0) {
@@ -538,6 +517,11 @@ function Matrix({
           ))}
         </tbody>
       </table>
+      {groups.length === 0 && (
+        <p className="muted">
+          No completed stays in these periods. The periods are shown even without measurements.
+        </p>
+      )}
     </div>
   );
 }
@@ -569,6 +553,7 @@ function FinishedList({
   kind: TotalKind;
   edges: { p25: number | null; p75: number | null } | undefined;
 }) {
+  const [sort, onSort] = useSort();
   const [found, setFound] = useState<PeriodFinished | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -598,8 +583,19 @@ function FinishedList({
       : part === "p25"
         ? measured.filter((row) => (took(row) ?? 0) <= (edges?.p25 ?? -Infinity) + 1e-9)
         : measured;
-  const sorted = [...rows].sort((a, b) =>
+  const defaultRows = [...rows].sort((a, b) =>
     part === "p25" ? (took(a) ?? 0) - (took(b) ?? 0) : (took(b) ?? 0) - (took(a) ?? 0),
+  );
+  const sorted = sortRows(defaultRows, sort, (row, key) =>
+    key === "card"
+      ? row.ref ?? row.item_id
+      : key === "time"
+        ? took(row)
+        : key === "finished"
+          ? row.finished_at
+          : key === "assigned"
+            ? row.assignees.length
+            : row.finished_by,
   );
   const label = kind === "lead" ? "Lead time" : "Cycle time";
   return (
@@ -617,11 +613,21 @@ function FinishedList({
       <table className="table table-compact stays-table">
         <thead>
           <tr>
-            <th>Card</th>
-            <th className="num">{label}</th>
-            <th>Finished</th>
-            <th>Assigned</th>
-            <th>Finished by</th>
+            <th>
+              <SortTitle label="Card" sortKey="card" sort={sort} onSort={onSort} />
+            </th>
+            <th className="num">
+              <SortTitle label={label} sortKey="time" sort={sort} onSort={onSort} />
+            </th>
+            <th>
+              <SortTitle label="Finished" sortKey="finished" sort={sort} onSort={onSort} />
+            </th>
+            <th>
+              <SortTitle label="Assigned" sortKey="assigned" sort={sort} onSort={onSort} />
+            </th>
+            <th>
+              <SortTitle label="Finished by" sortKey="person" sort={sort} onSort={onSort} />
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -674,6 +680,7 @@ function TotalSection({
   scope: ScrumScope;
 }) {
   const [picked, setPicked] = useState<{ index: number; part: TotalPart } | null>(null);
+  const announceOpen = useExclusiveMetricList(() => setPicked(null));
   const totals = new Map(data.totals.map((item) => [item.period, item]));
   const points = data.periods.map((period) => {
     const total = totals.get(period.key);
@@ -697,7 +704,13 @@ function TotalSection({
   const previousIndex = filled[filled.length - 2];
   const latest = points[latestIndex];
   const previous = previousIndex === undefined ? undefined : points[previousIndex];
-  const ratio = latest?.p50 && previous?.p50 ? latest.p50 / previous.p50 : null;
+  const ratio =
+    latest?.p50 &&
+    previous?.p50 &&
+    latest.measured >= settings.few &&
+    previous.measured >= settings.few
+      ? latest.p50 / previous.p50
+      : null;
   const waitingShare =
     latest && latest.waiting + latest.work > 0
       ? latest.waiting / (latest.waiting + latest.work)
@@ -728,6 +741,9 @@ function TotalSection({
             <>
               {latest?.label}
               {latest?.current ? " (going)" : ""}
+              {latest && latest.measured < settings.few
+                ? `, only ${latest.measured} measured`
+                : ""}
               {ratio !== null ? `, ${changeText(ratio)} against ${previous?.label}` : ""}
             </>
           }
@@ -735,7 +751,7 @@ function TotalSection({
         <StatTile
           label="In work now"
           value={formatNumber(data.in_work_now)}
-          detail="cards in Work or Rework statuses"
+          detail="cards in Work statuses"
         />
         <StatTile
           label="Oldest in work"
@@ -763,13 +779,27 @@ function TotalSection({
         />
       </div>
       <div className="metric-chart">
-        <TotalChart points={points} onPick={(index, part) => setPicked({ index, part })} />
+        <TotalChart
+          points={points}
+          few={settings.few}
+          onPick={(index, part) => {
+            if (picked?.index !== index || picked.part !== part) announceOpen();
+            setPicked((current) =>
+              current?.index === index && current.part === part ? null : { index, part },
+            );
+          }}
+        />
       </div>
       {picked && data.periods[picked.index] && (
-        <SidePanel
-          title={`${data.periods[picked.index]?.label ?? ""} · ${PART_TITLES[picked.part]}`}
-          onClose={() => setPicked(null)}
-        >
+        <div className="inline-metric-list">
+          <div className="inline-metric-heading">
+            <h3>
+              {data.periods[picked.index]?.label ?? ""} · {PART_TITLES[picked.part]}
+            </h3>
+            <button type="button" className="link-button" onClick={() => setPicked(null)}>
+              Close
+            </button>
+          </div>
           <FinishedList
             slug={slug}
             itemType={itemType}
@@ -781,7 +811,7 @@ function TotalSection({
             kind={settings.total}
             edges={points[picked.index]}
           />
-        </SidePanel>
+        </div>
       )}
     </MetricCard>
   );
@@ -833,6 +863,7 @@ function CellDetail({
   period: PeriodRef | null;
   taigaUrl: string | null;
 }) {
+  const [sort, onSort] = useSort();
   const [stays, setStays] = useState<PeriodStays | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -936,15 +967,35 @@ function CellDetail({
       <table className="table table-compact stays-table">
         <thead>
           <tr>
-            <th>Card</th>
-            <th className="num">Stayed</th>
-            <th>Left</th>
-            <th>Assigned</th>
-            <th>Moved on by</th>
+            <th>
+              <SortTitle label="Card" sortKey="card" sort={sort} onSort={onSort} />
+            </th>
+            <th className="num">
+              <SortTitle label="Stayed" sortKey="days" sort={sort} onSort={onSort} />
+            </th>
+            <th>
+              <SortTitle label="Left" sortKey="left" sort={sort} onSort={onSort} />
+            </th>
+            <th>
+              <SortTitle label="Assigned" sortKey="assigned" sort={sort} onSort={onSort} />
+            </th>
+            <th>
+              <SortTitle label="Moved on by" sortKey="person" sort={sort} onSort={onSort} />
+            </th>
           </tr>
         </thead>
         <tbody>
-          {stays.rows.map((row) => (
+          {sortRows(stays.rows, sort, (row, key) =>
+            key === "card"
+              ? row.ref ?? row.item_id
+              : key === "days"
+                ? row.days
+                : key === "left"
+                  ? row.end
+                  : key === "assigned"
+                    ? row.assignees.length
+                    : row.exited_by,
+          ).map((row) => (
             <tr key={`${row.item_id}-${row.end}`}>
               <td className="truncate">
                 <CardTitle
@@ -1134,12 +1185,6 @@ function TableSettings({
           options={METRICS}
           onChange={(metric) => update({ metric: metric as Metric })}
         />
-        <Segmented
-          label="Scale"
-          options={SCALES}
-          value={settings.scale}
-          onChange={(scale) => update({ scale })}
-        />
         <button
           type="button"
           className="link-button scrum-reset"
@@ -1178,50 +1223,50 @@ function TableSettings({
   );
 }
 
-export function ScrumPage({
+export function PeriodSection({
   slug,
-  itemType,
-  projects,
+  project,
+  selection,
+  period,
   taigaUrl,
+  itemType = null,
 }: {
   slug: string;
-  itemType: ItemType | null;
-  projects: ProjectSummary[] | null;
+  project: ProjectSummary;
+  selection: FilterSelection;
+  period: Period;
   taigaUrl: string | null;
+  itemType?: ItemType | null;
 }) {
-  const project = projects?.find((candidate) => candidate.slug === slug);
   const available = projectTypes(project);
-  const types = SCRUM_TYPES.filter((type) => available.includes(type));
-  const shown = itemType ?? (types.includes("userstory") ? "userstory" : types[0] ?? null);
-  const base = useMemo(
-    () => defaults(project ? project.has_scrum && project.has_sprints : true),
-    [project],
-  );
-  const [settings, setSettings] = useState<Settings>(() => readSettings(base));
-  const [selection, setSelection] = useFilterSelection(slug);
-  const [filtersOpen, setFiltersOpen] = useFiltersOpen();
+  const types = itemType ? [] : SCRUM_TYPES.filter((type) => available.includes(type));
+  const [chosen, setChosen] = useState<ItemType | null>(null);
+  const shown =
+    itemType ??
+    (chosen && types.includes(chosen)
+      ? chosen
+      : types.includes("userstory")
+        ? "userstory"
+        : types[0] ?? null);
+  const hasSprints = project.has_periods;
+  const base = useMemo(() => defaults(), []);
+  const [settings, setSettings] = useState<Settings>(() => readSettings(base, hasSprints));
   const [data, setData] = useState<PeriodStatusTimes | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [opened, setOpened] = useState<Opened | null>(null);
+  const announceOpen = useExclusiveMetricList(() => setOpened(null));
 
-  useEffect(() => {
-    const query = new URLSearchParams(window.location.search);
-    if (query.has("include") || query.has("exclude")) {
-      setSelection({ include: query.getAll("include"), exclude: query.getAll("exclude") });
-    }
-  }, []);
-  useEffect(() => writeUrl(settings, base, selection), [settings, base, selection]);
+  useEffect(() => writeUrl(settings, base), [settings, base]);
 
-  const [shared, setShared] = usePeriod(slug);
   const scope = useMemo<ScrumScope>(
     () => ({
       by: settings.by,
-      from: settings.from,
-      to: settings.to,
+      from: period.from,
+      to: period.to,
       pass: settings.pass,
-      days: shared.days,
+      days: period.days,
     }),
-    [settings.by, settings.from, settings.to, settings.pass, shared.days],
+    [settings.by, period.from, period.to, settings.pass, period.days],
   );
   const update = (next: Partial<Settings>) => setSettings((current) => ({ ...current, ...next }));
 
@@ -1252,44 +1297,45 @@ export function ScrumPage({
     [data, settings.last],
   );
 
-  if (projects && (!project || !project.has_scrum)) {
-    return <NotFoundPage />;
+  if (!shown) {
+    return null;
   }
 
   const metricLabel = METRICS.find((metric) => metric.value === settings.metric)?.label ?? "";
   const statusPoints =
     opened?.kind === "status" && shownData
-      ? shownData.periods.map((period) => {
+      ? shownData.periods.map((item) => {
           const found = shownData.cells.find(
-            (item) => item.period === period.key && item.status_id === opened.status.status_id,
+            (cell) => cell.period === item.key && cell.status_id === opened.status.status_id,
           );
           return found
-            ? { label: period.label, p25: found.p25, p50: found.p50, p75: found.p75, n: found.n }
+            ? { label: item.label, p25: found.p25, p50: found.p50, p75: found.p75, n: found.n }
             : null;
         })
       : [];
 
   return (
     <>
-      <h1>Scrum</h1>
+      <div className="section-title">
+        <h2>Period by period</h2>
+        <p className="muted">
+          How the time of cards changes from one{" "}
+          {settings.by === "sprint" ? "sprint" : settings.by} to the next, under the filters and
+          dates above.
+        </p>
+      </div>
       <div className="toolbar">
-        <FilterButton
-          open={filtersOpen}
-          selection={selection}
-          period={{ from: settings.from, to: settings.to, days: shared.days }}
-          onToggle={() => setFiltersOpen(!filtersOpen)}
-        />
-        {types.length > 1 && shown && (
+        {types.length > 1 && (
           <Segmented
             label="Card type"
             options={types.map((type) => ({ value: type, label: TYPE_LABELS[type] }))}
             value={shown}
-            onChange={(type) => navigate(`${scrumPath(slug, type)}${window.location.search}`)}
+            onChange={setChosen}
           />
         )}
         <Segmented
           label="Periods"
-          options={KINDS}
+          options={kindsOf(hasSprints)}
           value={settings.by}
           onChange={(by) => update({ by })}
         />
@@ -1300,104 +1346,113 @@ export function ScrumPage({
           onChange={(last) => update({ last: Math.max(1, Math.round(last)) })}
         />
       </div>
-      <div className="with-filters">
-        {filtersOpen && shown && (
-          <FilterPanel
-            slug={slug}
-            itemType={shown}
-            selection={selection}
-            onChange={setSelection}
-            period={{ from: settings.from, to: settings.to, days: shared.days }}
-            onPeriodChange={(period) => {
-              update({ from: period.from, to: period.to });
-              if (period.days !== shared.days) {
-                setShared({ ...shared, days: period.days });
-              }
-            }}
-          />
-        )}
-        <div className={`filtered-content${data === null && !error ? " loading" : ""}`}>
-          {error && <div className="banner banner-fail">{error}</div>}
-          {shownData && shown && (
-            <div className="flow-metrics">
-              {shownData.periods.length > 0 && (
-                <TotalSection
-                  data={shownData}
-                  settings={settings}
-                  onSettings={update}
-                  slug={slug}
-                  itemType={shown}
-                  taigaUrl={taigaUrl}
-                  selection={selection}
-                  scope={scope}
-                />
-              )}
-              <MetricCard
-                title="Time in statuses by period"
-                subtitle={
-                  <>
-                    {metricLabel} of the stays in each status that ended in each period, oldest
-                    period first; the small number is how many stays. Darker means longer, on a log
-                    scale. Cells with too few stays are pale and not compared. The arrow is the
-                    change against the period before, in percent: red when longer, green when
-                    shorter; a group row adds up each card's time in the group's statuses and takes
-                    the median over cards. Click a cell for its stays, a status for its trend.
-                  </>
-                }
-              >
-                <TableSettings settings={settings} base={base} onSettings={update} />
-                <Matrix
-                  data={data ?? shownData}
-                  settings={settings}
-                  onSettings={update}
-                  onOpen={setOpened}
-                />
-              </MetricCard>
-            </div>
-          )}
-        </div>
-      </div>
-      {opened && shown && (
-        <SidePanel
-          title={
-            opened.kind === "status"
-              ? opened.status.name
-              : `${opened.status.name} · ${opened.period?.label ?? "No sprint"}`
-          }
-          onClose={() => setOpened(null)}
-        >
-          {opened.kind === "status" && shownData ? (
-            <>
-              <p className="muted">
-                Median of each period with the middle half of the stays as a band; a bigger dot
-                means more stays, a hollow one too few to judge.
-              </p>
-              <StatusTrendChart
-                labels={shownData.periods.map((period) => period.label)}
-                points={statusPoints}
-                few={settings.few}
-              />
-              <StatusSummary
-                data={shownData}
-                status={opened.status}
-                settings={settings}
-                slug={slug}
-                itemType={shown}
-                onPeriod={(period) => setOpened({ kind: "cell", status: opened.status, period })}
-              />
-            </>
-          ) : (
-            <CellDetail
+      {error && <div className="banner banner-fail">{error}</div>}
+      {shownData && (
+        <div className={`flow-metrics${data === null ? " loading" : ""}`}>
+          {shownData.periods.length > 0 && (
+            <TotalSection
+              data={shownData}
+              settings={settings}
+              onSettings={update}
               slug={slug}
               itemType={shown}
+              taigaUrl={taigaUrl}
               selection={selection}
               scope={scope}
-              status={opened.status}
-              period={opened.period ?? null}
-              taigaUrl={taigaUrl}
             />
           )}
-        </SidePanel>
+          <MetricCard
+            title="Time in statuses by period"
+            subtitle={
+              <>
+                {metricLabel} of the stays in each status that ended in each period, oldest period
+                first; the small number is how many stays. Cells with too few stays are pale and
+                not compared. The arrow is the change against the period before, in percent: red
+                when longer, green when shorter; a group row adds up each card's time in the
+                group's statuses and takes the median over cards. Click a cell for its stays, a
+                status for its trend.
+              </>
+            }
+          >
+            <TableSettings settings={settings} base={base} onSettings={update} />
+            <Matrix
+              data={data ?? shownData}
+              settings={settings}
+              onSettings={update}
+              onOpen={(next) => {
+                if (
+                  !(
+                    opened?.kind === next.kind &&
+                    opened.status.status_id === next.status.status_id &&
+                    opened.period?.key === next.period?.key
+                  )
+                )
+                  announceOpen();
+                setOpened((current) =>
+                  current?.kind === next.kind &&
+                  current.status.status_id === next.status.status_id &&
+                  current.period?.key === next.period?.key
+                    ? null
+                    : next,
+                );
+              }}
+              opened={opened}
+              detail={
+                opened && (
+                  <>
+                    <div className="inline-metric-heading">
+                      <h3>
+                        {opened.kind === "status"
+                          ? opened.status.name
+                          : `${opened.status.name} · ${opened.period?.label ?? "No sprint"}`}
+                      </h3>
+                      <button
+                        type="button"
+                        className="link-button"
+                        onClick={() => setOpened(null)}
+                      >
+                        Close
+                      </button>
+                    </div>
+                    {opened.kind === "status" && shownData ? (
+                      <>
+                        <p className="muted">
+                          Median of each period with the middle half of the stays as a band; a
+                          bigger dot means more stays, a hollow one too few to judge.
+                        </p>
+                        <StatusTrendChart
+                          labels={shownData.periods.map((item) => item.label)}
+                          points={statusPoints}
+                          few={settings.few}
+                        />
+                        <StatusSummary
+                          data={shownData}
+                          status={opened.status}
+                          settings={settings}
+                          slug={slug}
+                          itemType={shown}
+                          onPeriod={(item) =>
+                            setOpened({ kind: "cell", status: opened.status, period: item })
+                          }
+                        />
+                      </>
+                    ) : (
+                      <CellDetail
+                        slug={slug}
+                        itemType={shown}
+                        selection={selection}
+                        scope={scope}
+                        status={opened.status}
+                        period={opened.period ?? null}
+                        taigaUrl={taigaUrl}
+                      />
+                    )}
+                  </>
+                )
+              }
+            />
+          </MetricCard>
+        </div>
       )}
     </>
   );

@@ -2,8 +2,9 @@ import { useEffect, useState, type ReactNode } from "react";
 
 import {
   fetchFlow,
-  type Swimlanes,
+  fetchDirections,
   type ColumnTime,
+  type DirectionRef,
   type FlowResponse,
   type ItemType,
   type ProjectSummary,
@@ -11,17 +12,17 @@ import {
 import { formatDuration } from "../charts/format";
 import { StatTile } from "../charts/StatTile";
 import { CardTitle } from "../components/CardTitle";
-import { FilterButton, FilterPanel } from "../components/FilterPanel";
+import { FilterPanel } from "../components/FilterPanel";
 import { PeopleRefs, PersonRef } from "../components/PersonLink";
+import { MetricList } from "../components/MetricList";
+import { MetricPopup } from "../components/MetricPopup";
 import { StuckBadge } from "../components/StayBadge";
 import { TextLink } from "../components/TextLink";
-import { SprintSelect } from "../components/SprintSelect";
-import { StatusName } from "../components/StatusName";
-import { SwimlaneSelect, UNCLASSIFIED, useSwimlanes } from "../components/SwimlaneSelect";
-import { useFilterSelection, useFiltersOpen, usePeriod } from "../filterState";
+import { SwimlaneSelect, useSwimlanes } from "../components/SwimlaneSelect";
+import { useFilterSelection, usePeriod } from "../filterState";
 import { formatNumber, ITEM_TYPE_FILTERS } from "../format";
 import { MODULE_INFO, MODULE_OF_TYPE, TYPE_LABELS } from "../modules";
-import { columnPath, KANBAN_MODULES, Link, modulePath, MODULES, navigate } from "../router";
+import { KANBAN_MODULES, MODULES, projectPath, rolePath } from "../router";
 import { Empty, MetricCard, StatusMoves } from "./FlowMetrics";
 import { NotFoundPage } from "./HomePage";
 
@@ -39,7 +40,6 @@ export function projectTypes(project: ProjectSummary | undefined): ItemType[] {
 function useColumnFlow(slug: string, itemType: ItemType | null, column: number | null = null) {
   const [selection, setSelection] = useFilterSelection(slug);
   const [period, setPeriod] = usePeriod(slug);
-  const [filtersOpen, setFiltersOpen] = useFiltersOpen();
   const [flow, setFlow] = useState<FlowResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const swimlanes = useSwimlanes(
@@ -71,13 +71,6 @@ function useColumnFlow(slug: string, itemType: ItemType | null, column: number |
 
   const toolbar = (extra?: ReactNode) => (
     <div className="toolbar">
-      <FilterButton
-        open={filtersOpen}
-        selection={selection}
-        period={period}
-        onToggle={() => setFiltersOpen(!filtersOpen)}
-      />
-      <SprintSelect slug={slug} period={period} onChange={setPeriod} />
       <SwimlaneSelect swimlanes={swimlanes} selection={selection} onChange={setSelection} />
       {extra}
     </div>
@@ -85,7 +78,7 @@ function useColumnFlow(slug: string, itemType: ItemType | null, column: number |
 
   const withFilters = (children: ReactNode) => (
     <div className="with-filters">
-      {filtersOpen && itemType && (
+      {itemType && (
         <FilterPanel
           slug={slug}
           itemType={itemType}
@@ -114,178 +107,146 @@ function ColumnHeading({ column }: { column: ColumnTime }) {
   );
 }
 
-function Lane({
-  slug,
-  itemType,
-  column,
-}: {
-  slug: string;
-  itemType: ItemType;
-  column: ColumnTime;
-}) {
-  return (
-    <Link
-      to={columnPath(slug, itemType, column.status_id)}
-      target="_blank"
-      rel="noreferrer"
-      className="kanban-lane"
-      style={{ borderTopColor: column.color || "#a9aabc" }}
-      title={`${column.name}: cards in it now and how long they stay`}
-    >
-      <span className="kanban-lane-title">{column.name}</span>
-      <span className="kanban-lane-badges">
-        {column.type && <span className="badge badge-muted">{column.type}</span>}
-        {column.is_deleted && <span className="badge badge-accent">Removed</span>}
-      </span>
-      <span className="kanban-lane-now">{formatNumber(column.in_column_now)}</span>
-      <span className="kanban-lane-caption">in it now</span>
-      <dl className="kanban-lane-stats">
-        <div>
-          <dt>Median</dt>
-          <dd>{formatDuration(column.p50)}</dd>
-        </div>
-        <div>
-          <dt>85% within</dt>
-          <dd>{formatDuration(column.p85)}</dd>
-        </div>
-        <div>
-          <dt>Passed</dt>
-          <dd>{formatNumber(column.cards)}</dd>
-        </div>
-      </dl>
-    </Link>
-  );
+function median(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const ordered = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(ordered.length / 2);
+  return ordered.length % 2
+    ? ordered[middle] ?? null
+    : ((ordered[middle - 1] ?? 0) + (ordered[middle] ?? 0)) / 2;
 }
 
-function SwimlaneBoard({
+function ColumnPeople({
+  flow,
+  directions,
+  statusId,
   slug,
   itemType,
-  report,
-  swimlanes,
+  taigaUrl,
 }: {
+  flow: FlowResponse;
+  directions: DirectionRef[];
+  statusId: number;
   slug: string;
   itemType: ItemType;
-  report: FlowResponse["report"];
-  swimlanes: Swimlanes;
+  taigaUrl: string | null;
 }) {
-  const now = report.column_cards.filter((card) => card.now);
-  const laneOf = (itemId: number) => swimlanes.cards[String(itemId)] ?? null;
-  const rows: { id: number | null; name: string; wip: Record<string, number> }[] = [
-    ...(now.some((card) => laneOf(card.item_id) === null)
-      ? [{ id: null, name: UNCLASSIFIED, wip: {} }]
-      : []),
-    ...swimlanes.lanes.map((lane) => ({ id: lane.id, name: lane.name, wip: lane.wip })),
-  ];
+  const roleIds = flow.column_roles[String(statusId)] ?? [];
+  const roles = directions.filter((role) => roleIds.includes(role.role_id));
+  const members = new Set(roles.flatMap((role) => role.members));
+  const cards = flow.report.column_cards.filter((card) => card.status_id === statusId);
+  const people = new Set([...members, ...cards.flatMap((card) => card.assignees)]);
+  const rows = [...people]
+    .map((id) => {
+      const own = cards.filter((card) => card.assignees.includes(id));
+      const now = own.filter((card) => card.now);
+      const passed = own.filter((card) => !card.now);
+      const memberRoles = roles.filter((role) => role.members.includes(id));
+      return { id, now, passed, member: members.has(id), memberRoles };
+    })
+    .sort(
+      (a, b) =>
+        Number(b.member) - Number(a.member) ||
+        b.now.length - a.now.length ||
+        b.passed.length - a.passed.length ||
+        (flow.people[String(a.id)] ?? "").localeCompare(flow.people[String(b.id)] ?? ""),
+    );
+  const personList = (row: (typeof rows)[number], now: boolean) => (
+    <MetricList
+      flow={flow}
+      slug={slug}
+      itemType={itemType}
+      taigaUrl={taigaUrl}
+      list={{
+        title: `${flow.people[String(row.id)] ?? `User ${row.id}`}: ${
+          now ? "in status now" : "passed in period"
+        }`,
+        timeLabel: "In status",
+        cards: (now ? row.now : row.passed).map((card) => ({
+          item_id: card.item_id,
+          ref: card.ref,
+          subject: card.subject,
+          status_id: card.status_id,
+          days: card.days,
+          assignees: card.assignees,
+          is_deleted: card.is_deleted,
+        })),
+      }}
+    />
+  );
   return (
     <MetricCard
-      title="Swimlanes"
-      subtitle="Cards in each status of each swimlane right now, with the swimlane's work in progress limit from Taiga where one is set"
+      title="By person in this status"
+      subtitle="Members of the responsible roles come first. Shared cards count for each assigned person; passed cards use assignees at the last exit in the period."
     >
-      <div className="matrix-scroll">
-        <table className="table swimlane-board">
+      {roles.length > 0 && (
+        <p className="column-roles">
+          Responsible roles:{" "}
+          {roles.map((role, index) => (
+            <span key={role.role_id}>
+              {index > 0 ? ", " : ""}
+              <TextLink to={rolePath(slug, role.role_id)}>{role.name}</TextLink>
+            </span>
+          ))}
+        </p>
+      )}
+      {rows.length === 0 ? (
+        <Empty>No assignees in this status or its responsible roles.</Empty>
+      ) : (
+        <table className="table table-compact breakdown-table">
           <thead>
             <tr>
-              <th>Swimlane</th>
-              {report.columns.map((column) => (
-                <th key={column.status_id} className="num">
-                  <StatusName
-                    slug={slug}
-                    itemType={itemType}
-                    id={column.is_deleted ? null : column.status_id}
-                    name={column.name}
-                    color={column.color}
-                  />
-                </th>
-              ))}
-              <th className="num">Total</th>
+              <th>Person</th>
+              <th>Role</th>
+              <th className="num">In it now</th>
+              <th className="num">Passed</th>
+              <th className="num">Median time</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((row) => {
-              const cards = now.filter((card) => laneOf(card.item_id) === row.id);
-              return (
-                <tr key={String(row.id)}>
-                  <th scope="row">{row.name}</th>
-                  {report.columns.map((column) => {
-                    const count = cards.filter(
-                      (card) => card.status_id === column.status_id,
-                    ).length;
-                    const limit = row.wip[String(column.status_id)];
-                    const over = limit !== undefined && count > limit;
-                    return (
-                      <td
-                        key={column.status_id}
-                        className={`num${over ? " over-limit" : ""}`}
-                        title={
-                          limit === undefined
-                            ? undefined
-                            : `Limit ${limit}${over ? `: ${count - limit} over` : ""}`
-                        }
-                      >
-                        {count > 0 ? formatNumber(count) : <span className="matrix-empty">·</span>}
-                        {limit !== undefined && <span className="wip-limit"> / {limit}</span>}
-                      </td>
-                    );
-                  })}
-                  <td className="num">{formatNumber(cards.length)}</td>
-                </tr>
-              );
-            })}
+            {rows.map((row) => (
+              <tr key={row.id}>
+                <td>
+                  <PersonRef directory={flow} id={row.id} nobody="Unknown" />
+                </td>
+                <td>
+                  {row.member ? (
+                    row.memberRoles.map((role, index) => (
+                      <span key={role.role_id}>
+                        {index > 0 ? ", " : ""}
+                        <TextLink to={rolePath(slug, role.role_id)}>{role.name}</TextLink>
+                      </span>
+                    ))
+                  ) : (
+                    <span className="muted-inline">Outside responsible roles</span>
+                  )}
+                </td>
+                <td className="num">
+                  <MetricPopup
+                    label={`Show ${flow.people[String(row.id)] ?? row.id}: in status now`}
+                    content={personList(row, true)}
+                  >
+                    {formatNumber(row.now.length)}
+                  </MetricPopup>
+                </td>
+                <td className="num">
+                  <MetricPopup
+                    label={`Show ${flow.people[String(row.id)] ?? row.id}: passed in period`}
+                    content={personList(row, false)}
+                  >
+                    {formatNumber(row.passed.length)}
+                  </MetricPopup>
+                </td>
+                <td className="num">
+                  {formatDuration(median(row.passed.map((card) => card.days)))}
+                </td>
+              </tr>
+            ))}
           </tbody>
         </table>
-      </div>
+      )}
     </MetricCard>
   );
-}
-
-export function KanbanBoard({
-  slug,
-  itemType,
-  report,
-  swimlanes = null,
-}: {
-  slug: string;
-  itemType: ItemType;
-  report: FlowResponse["report"];
-  swimlanes?: Swimlanes | null;
-}) {
-  if (report.columns.length === 0) {
-    return <Empty>This card type has no statuses.</Empty>;
-  }
-  return (
-    <div className="flow-metrics">
-      <div className="kanban-board">
-        {report.columns.map((column) => (
-          <Lane key={column.status_id} slug={slug} itemType={itemType} column={column} />
-        ))}
-      </div>
-      {swimlanes && swimlanes.lanes.length > 0 && (
-        <SwimlaneBoard slug={slug} itemType={itemType} report={report} swimlanes={swimlanes} />
-      )}
-    </div>
-  );
-}
-
-export function KanbanPage({
-  slug,
-  projects,
-}: {
-  slug: string;
-  projects: ProjectSummary[] | null;
-}) {
-  const project = projects?.find((candidate) => candidate.slug === slug);
-  const target = project?.has_kanban
-    ? KANBAN_MODULES.find((module) => project.modules.includes(module))
-    : undefined;
-  useEffect(() => {
-    if (target) {
-      navigate(modulePath(slug, target, "kanban"), true);
-    }
-  }, [slug, target]);
-  if (projects && !target) {
-    return <NotFoundPage />;
-  }
-  return null;
 }
 
 export function ColumnPage({
@@ -303,6 +264,16 @@ export function ColumnPage({
 }) {
   const project = projects?.find((candidate) => candidate.slug === slug);
   const { flow, toolbar, withFilters } = useColumnFlow(slug, itemType, statusId);
+  const [directions, setDirections] = useState<DirectionRef[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    fetchDirections(slug)
+      .then((found) => !cancelled && setDirections(found))
+      .catch(() => !cancelled && setDirections([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [slug]);
 
   if (projects && !project) {
     return <NotFoundPage />;
@@ -314,9 +285,7 @@ export function ColumnPage({
   return (
     <>
       <div className="breadcrumb">
-        <TextLink to={modulePath(slug, MODULE_OF_TYPE[itemType])}>
-          {TYPE_LABELS[itemType]}
-        </TextLink>
+        <TextLink to={projectPath(slug)}>Overview</TextLink> · {TYPE_LABELS[itemType]}
       </div>
       <h1 className="column-title">
         {column ? <ColumnHeading column={column} /> : "Status"}
@@ -408,7 +377,7 @@ export function ColumnPage({
                               nobody="Unassigned"
                             />
                           </td>
-                          <td className="truncate">
+                          <td className="nowrap">
                             <PersonRef directory={flow} id={card.created_by} nobody="Unknown" />
                           </td>
                           <td className="num">{formatDuration(card.days_in_column)}</td>
@@ -422,6 +391,15 @@ export function ColumnPage({
                   </table>
                 )}
               </MetricCard>
+
+              <ColumnPeople
+                flow={flow}
+                directions={directions}
+                statusId={statusId}
+                slug={slug}
+                itemType={itemType}
+                taigaUrl={taigaUrl}
+              />
 
               <StatusMoves
                 flow={flow}

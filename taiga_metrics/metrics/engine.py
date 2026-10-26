@@ -30,14 +30,17 @@ from typing import TYPE_CHECKING, Final, Literal
 
 from taiga_metrics.filters import AssignmentFilter
 from taiga_metrics.metrics.calendar import WorkCalendar, percentile
+from taiga_metrics.metrics.returns import ReturnRules, first_passes, returns_of
 from taiga_metrics.project_settings import ColumnType
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterable, Sequence
+    from collections.abc import Iterable, Sequence
+
+    from taiga_metrics.metrics.returns import Return
 
 
-OPEN_TYPES: Final = frozenset({"queue", "work", "rework", None})
-IN_PROGRESS_TYPES: Final = frozenset({"work", "rework"})
+OPEN_TYPES: Final = frozenset({"queue", "work", None})
+IN_PROGRESS_TYPES: Final = frozenset({"work"})
 MIN_SAMPLES_FOR_AGING: Final = 3
 MISCLICK: Final = timedelta(minutes=5)
 LEVEL_MARGIN_DAYS: Final = 1 / 24
@@ -139,7 +142,8 @@ class FlowOptions:
     The period runs from ``since`` up to ``until``, either end open when ``None``.
     ``people`` narrows everything to the stretches when the right people were
     assigned; ``roles_of`` gives each member's role for it. ``column`` asks for the
-    cards standing in that column right now.
+    cards standing in that column right now. ``usual`` is the yardstick of what is stuck
+    now, per column; without it the report's own stays are used.
     """
 
     now: datetime
@@ -150,6 +154,8 @@ class FlowOptions:
     people: AssignmentFilter | None = None
     roles_of: Mapping[int, int | None] = field(default_factory=dict)
     column: int | None = None
+    usual: Mapping[int, StayTime] | None = None
+    returns: ReturnRules = field(default_factory=ReturnRules)
 
     @property
     def end(self) -> datetime:
@@ -159,7 +165,13 @@ class FlowOptions:
 
 @dataclass(frozen=True)
 class ColumnTime:
-    """Time spent in one column across cards: each card's visits added up."""
+    """Time spent in one column across cards: each card's visits added up.
+
+    ``used`` tells whether the column held any card in the period, or holds one now
+    while the period reaches today: the columns as they were then, removed ones too.
+    ``passes`` are the cards that left it for the first time in the period, by a move
+    that was not a return, and ``clean_passes`` those of them that never came back to it.
+    """
 
     status_id: int
     name: str
@@ -171,6 +183,9 @@ class ColumnTime:
     p85: float | None
     p95: float | None
     in_column_now: int
+    used: bool = True
+    passes: int = 0
+    clean_passes: int = 0
 
 
 @dataclass(frozen=True)
@@ -257,22 +272,72 @@ class Week:
 
 @dataclass(frozen=True)
 class BackMove:
-    """How often cards moved from one column back to an earlier one, or into rework."""
+    """How often cards went back from one column to another, by the project's rules.
+
+    ``credited_status`` is the destination used by the configured return rule. For an
+    entry into REWORK it identifies the triage stage, not the person whose work failed.
+    """
 
     from_status: int
     to_status: int
     count: int
     reopen: bool
-    rework: bool = False
+    credited_status: int | None = None
 
 
 @dataclass(frozen=True)
 class BackMoves:
-    """Backward moves and reopenings in the period."""
+    """Return events and linked cases in the period.
+
+    ``rework_entries`` and ``rework_routes`` count different events. A case is
+    dated by detection; its later route can fall outside the selected period.
+    """
 
     moves: tuple[BackMove, ...]
     cards_moved: int
     cards_with_back_moves: int
+    cases: tuple[ReturnCase, ...] = ()
+    rework_entries: int = 0
+    rework_routes: int = 0
+    events: tuple["ReturnEvent", ...] = ()
+
+
+@dataclass(frozen=True)
+class ReturnEvent:
+    item_id: int
+    ref: int | None
+    subject: str
+    happened_at: datetime
+    from_status: int
+    to_status: int
+    credited_status: int
+    credited: frozenset[int]
+
+
+@dataclass(frozen=True)
+class FirstPassEvent:
+    item_id: int
+    ref: int | None
+    subject: str
+    status_id: int
+    passed_at: datetime
+    author: int | None
+    clean: bool
+
+
+@dataclass(frozen=True)
+class ReturnCase:
+    """A return case observed in history, possibly with its REWORK routing decision."""
+
+    item_id: int
+    ref: int | None
+    subject: str
+    kind: Literal["direct", "rework", "unlinked_route"]
+    detected_at: datetime
+    from_status: int
+    to_status: int
+    routed_at: datetime | None = None
+    routed_to: int | None = None
 
 
 @dataclass(frozen=True)
@@ -376,6 +441,7 @@ class FlowReport:
     throughput: tuple[Week, ...]
     back_moves: BackMoves
     stuck: tuple[StuckCard, ...]
+    stuck_at_end: tuple[StuckCard, ...] = ()
     moves: tuple[MoveCount, ...] = ()
     moves_by_assignee: tuple[PersonMoves, ...] = ()
     moves_by_mover: tuple[PersonMoves, ...] = ()
@@ -383,13 +449,16 @@ class FlowReport:
     stay_times: tuple[StayTime, ...] = ()
     column_cards: tuple[ColumnCard, ...] = ()
     finishes: tuple[FinishedCard, ...] = ()
+    first_passes: tuple[FirstPassEvent, ...] = ()
 
 
 def intervals_of(card: Card, now: datetime) -> list[Interval]:
     """The card's stays in columns, oldest first; the last is open unless deleted.
 
     Creation starts the first stay. Without a creation entry, the card starts at its
-    creation time in the column its first move leaves, or in its current column.
+    creation time in the column its first move leaves, or in its current column. When the
+    history never reached the card's current column, a change Taiga did not record, the
+    open stay is in the current column, so the card stands where the board shows it.
     """
     steps = list(card.steps)
     intervals: list[Interval] = []
@@ -408,7 +477,7 @@ def intervals_of(card: Card, now: datetime) -> list[Interval]:
             return intervals
         current, since = step.to_status, step.happened_at
     if current is not None and since is not None and not card.is_deleted:
-        intervals.append(Interval(current, since, None, None))
+        intervals.append(Interval(card.status_id or current, since, None, None))
     return intervals
 
 
@@ -423,7 +492,7 @@ def assignment_windows(card: Card, options: FlowOptions) -> list[tuple[datetime,
     windows: list[tuple[datetime, datetime]] = []
     for index, (start, assignees) in enumerate(bounds):
         end = bounds[index + 1][0] if index + 1 < len(bounds) else FAR_FUTURE
-        if end <= start or not options.people.matches(assignees, options.roles_of):
+        if end <= start or not options.people.takes(assignees, options.roles_of):
             continue
         if windows and windows[-1][1] == start:
             windows[-1] = (windows[-1][0], end)
@@ -453,9 +522,8 @@ def counts_at(card: Card, moment: datetime, options: FlowOptions) -> bool:
     """
     if options.people is None:
         return True
-    return any(
-        options.people.matches(assignees, options.roles_of)
-        for assignees in (card.assigned_before(moment), card.assigned_at(moment))
+    return options.people.takes_event(
+        card.assigned_before(moment), card.assigned_at(moment), options.roles_of
     )
 
 
@@ -481,13 +549,17 @@ def interval_days(
     )
 
 
-def finish_time(card: Card, types: Mapping[int, ColumnType | None]) -> datetime | None:
-    """When the card last entered Done from outside Done, if it is in Done now."""
-    if card.is_deleted:
+def finish_time(
+    card: Card, types: Mapping[int, ColumnType | None], *, as_of: datetime | None = None
+) -> datetime | None:
+    """Last acceptance while in Done, at the requested time or now."""
+    if card.is_deleted and as_of is None:
         return None
     finished: datetime | None = None
     in_done = False
     for step in card.steps:
+        if as_of is not None and step.happened_at >= as_of:
+            break
         if step.kind == "delete":
             return None
         entering_done = types.get(step.to_status or -1) == "done"
@@ -566,48 +638,153 @@ def weeks(
 def back_moves(
     cards: Sequence[Card], columns: Mapping[int, Column], options: FlowOptions
 ) -> BackMoves:
-    """Moves to an earlier column, into a Rework column, and out of Done.
-
-    A move back out of a column entered less than ``misclick`` earlier is treated as
-    undoing a mistaken move, not as work going back. Cancelled columns never count, and
-    leaving a Rework column is the work resuming, not going back.
-    """
-    counts: Counter[tuple[int, int, bool, bool]] = Counter()
+    """Group return events and link REWORK detection to its routing decision."""
+    counts: Counter[tuple[int, int, bool, int]] = Counter()
     moved: set[int] = set()
     returned: set[int] = set()
+    cases: list[ReturnCase] = []
+    events: list[ReturnEvent] = []
+    entries = routes = 0
+    rework = {
+        status_id
+        for status_id, column in columns.items()
+        if not column.is_deleted and column.name.strip().upper() == "REWORK"
+    }
     for card in cards:
-        entered: datetime | None = None
-        for step in card.steps:
-            if (
-                step.kind == "move"
-                and in_period(step.happened_at, options)
-                and counts_at(card, step.happened_at, options)
-            ):
-                moved.add(card.item_id)
-                source = columns.get(step.from_status or -1)
-                target = columns.get(step.to_status or -1)
-                quick = entered is not None and step.happened_at - entered < options.misclick
-                if (
-                    source
-                    and target
-                    and not quick
-                    and "cancelled" not in (source.type, target.type)
-                ):
-                    reopen = source.type == "done" and target.type != "done"
-                    rework = target.type == "rework" and source.type != "rework"
-                    earlier = target.position < source.position and source.type != "rework"
-                    if reopen or rework or earlier:
-                        counts[(source.status_id, target.status_id, reopen, rework)] += 1
-                        returned.add(card.item_id)
-            entered = step.happened_at
+        if any(
+            step.kind == "move"
+            and in_period(step.happened_at, options)
+            and counts_at(card, step.happened_at, options)
+            for step in card.steps
+        ):
+            moved.add(card.item_id)
+        detected: list[ReturnCase] = []
+        pending: int | None = None
+        for item in card_returns(card, columns, options):
+            if item.to_status in rework and item.from_status not in rework:
+                detected.append(
+                    ReturnCase(
+                        card.item_id,
+                        card.ref,
+                        card.subject,
+                        "rework",
+                        item.happened_at,
+                        item.from_status,
+                        item.to_status,
+                    )
+                )
+                pending = len(detected) - 1
+            elif item.from_status in rework:
+                if pending is None:
+                    detected.append(
+                        ReturnCase(
+                            card.item_id,
+                            card.ref,
+                            card.subject,
+                            "unlinked_route",
+                            item.happened_at,
+                            item.from_status,
+                            item.to_status,
+                            item.happened_at,
+                            item.to_status,
+                        )
+                    )
+                else:
+                    detected[pending] = replace(
+                        detected[pending], routed_at=item.happened_at, routed_to=item.to_status
+                    )
+                    pending = None
+            else:
+                detected.append(
+                    ReturnCase(
+                        card.item_id,
+                        card.ref,
+                        card.subject,
+                        "direct",
+                        item.happened_at,
+                        item.from_status,
+                        item.to_status,
+                        item.happened_at,
+                        item.to_status,
+                    )
+                )
+            if in_period(item.happened_at, options) and counts_at(card, item.happened_at, options):
+                counts[(item.from_status, item.to_status, item.reopen, item.credited_status)] += 1
+                events.append(
+                    ReturnEvent(
+                        card.item_id,
+                        card.ref,
+                        card.subject,
+                        item.happened_at,
+                        item.from_status,
+                        item.to_status,
+                        item.credited_status,
+                        item.credited,
+                    )
+                )
+                returned.add(card.item_id)
+                entries += item.to_status in rework and item.from_status not in rework
+                routes += item.from_status in rework
+        for case in detected:
+            if in_period(case.detected_at, options) and counts_at(card, case.detected_at, options):
+                cases.append(
+                    replace(case, routed_at=None, routed_to=None)
+                    if case.routed_at is not None and case.routed_at >= options.end
+                    else case
+                )
     return BackMoves(
         moves=tuple(
-            BackMove(source, target, count, reopen, rework)
-            for (source, target, reopen, rework), count in counts.most_common()
+            BackMove(source, target, count, reopen, credited)
+            for (source, target, reopen, credited), count in counts.most_common()
         ),
         cards_moved=len(moved),
         cards_with_back_moves=len(returned),
+        cases=tuple(sorted(cases, key=lambda case: case.detected_at, reverse=True)),
+        rework_entries=entries,
+        rework_routes=routes,
+        events=tuple(sorted(events, key=lambda event: event.happened_at, reverse=True)),
     )
+
+
+def card_returns(card: Card, columns: Mapping[int, Column], options: FlowOptions) -> list[Return]:
+    """Every return of one card, by the project's rules."""
+    return returns_of(
+        intervals_of(card, options.now),
+        columns,
+        options.returns,
+        options.misclick,
+        card.assigned_before,
+    )
+
+
+def first_pass_counts(
+    cards: Sequence[Card], columns: Mapping[int, Column], options: FlowOptions
+) -> tuple[Counter[int], Counter[int], tuple[FirstPassEvent, ...]]:
+    """Per column, the first passes in the period and how many of them stayed clean."""
+    passes: Counter[int] = Counter()
+    clean: Counter[int] = Counter()
+    events: list[FirstPassEvent] = []
+    for card in cards:
+        intervals = intervals_of(card, options.now)
+        found = returns_of(
+            intervals, columns, options.returns, options.misclick, card.assigned_before
+        )
+        for item in first_passes(intervals, found, options.misclick, options.returns.pauses):
+            if in_period(item.passed_at, options) and counts_at(card, item.passed_at, options):
+                passes[item.status_id] += 1
+                clean[item.status_id] += item.clean
+                events.append(
+                    FirstPassEvent(
+                        card.item_id,
+                        card.ref,
+                        card.subject,
+                        item.status_id,
+                        item.passed_at,
+                        item.author,
+                        item.clean,
+                    )
+                )
+    return passes, clean, tuple(sorted(events, key=lambda event: event.passed_at, reverse=True))
 
 
 def person_moves(
@@ -622,7 +799,7 @@ def person_moves(
 
 def assigned_now(card: Card, options: FlowOptions) -> bool:
     """Whether the card's current assignees are the ones the filters ask for."""
-    return options.people is None or options.people.matches(card.assignees, options.roles_of)
+    return options.people is None or options.people.takes(card.assignees, options.roles_of)
 
 
 def finish_samples(
@@ -669,7 +846,10 @@ def stuck_cards(
 ) -> tuple[StuckCard, ...]:
     """Unfinished cards against the p85 and p95 of single stays there, most stuck first.
 
-    With ``column``, every card standing in that column, whatever its type.
+    Every card in a Queue, Work, or untyped column is listed, but only one in a Work
+    column can be stuck: waiting in a queue longer than usual is not work standing
+    still. With ``column``, every card standing in that column, whatever its type, each
+    judged against the column's own stays.
     """
     stuck = []
     for card, interval, days in open_stays:
@@ -680,7 +860,8 @@ def stuck_cards(
         )
         if not wanted or not assigned_now(card, options):
             continue
-        limits = thresholds.get(interval.status_id)
+        judged = column is not None or types.get(interval.status_id) in IN_PROGRESS_TYPES
+        limits = thresholds.get(interval.status_id) if judged else None
         enough = limits is not None and limits.stays >= MIN_SAMPLES_FOR_AGING
         p85 = limits.p85 if limits and enough else None
         p95 = limits.p95 if limits and enough else None
@@ -689,11 +870,20 @@ def stuck_cards(
             level = "red"
         elif p85 is not None and days > p85:
             level = "yellow"
+        idle_since = card.last_activity
+        if options.people is not None:
+            windows = assignment_windows(card, options)
+            current_window = next(
+                (start for start, end in reversed(windows or []) if start <= options.now < end),
+                None,
+            )
+            if current_window is not None:
+                idle_since = max(interval.start, current_window, idle_since or interval.start)
         idle = (
             calendars.of_group(card.assignees).days_between(
-                card.last_activity, options.now, working=options.working_days
+                idle_since, options.now, working=options.working_days
             )
-            if card.last_activity
+            if idle_since is not None
             else None
         )
         stuck.append(
@@ -892,9 +1082,7 @@ def card_report(
         )
         lead = lead_sample.days if lead_sample else None
         cycle = cycle_sample.days if cycle_sample else None
-    everything = FlowOptions(
-        now=options.now, since=None, working_days=options.working_days, misclick=options.misclick
-    )
+    everything = replace(options, since=None, until=None, people=None, column=None)
     returned = back_moves([card], {column.status_id: column for column in columns}, everything)
     return CardReport(
         stays=stays,
@@ -909,6 +1097,85 @@ def card_report(
         cycle_days=cycle,
         back_moves=sum(move.count for move in returned.moves),
     )
+
+
+def stay_time(status_id: int, values: Sequence[float]) -> StayTime:
+    """Percentiles of single stays in one column."""
+    return StayTime(
+        status_id=status_id,
+        stays=len(values),
+        p5=percentile(values, 0.05),
+        p15=percentile(values, 0.15),
+        p50=percentile(values, 0.5),
+        p85=percentile(values, 0.85),
+        p95=percentile(values, 0.95),
+    )
+
+
+def usual_stays(
+    cards: Sequence[Card], calendars: Calendars, options: FlowOptions
+) -> dict[int, StayTime]:
+    """Every finished stay of the cards, whole history and whoever was assigned, per column.
+
+    This is the yardstick of what is stuck now: it does not move with the period or
+    the filters. Stays shorter than the misclick threshold only passed through.
+    """
+    per_stay: dict[int, list[float]] = defaultdict(list)
+    for card in cards:
+        for interval in intervals_of(card, options.now):
+            if interval.end is not None and interval.end - interval.start >= options.misclick:
+                per_stay[interval.status_id].append(
+                    interval_days(interval, card, calendars, options)
+                )
+    return {status_id: stay_time(status_id, values) for status_id, values in per_stay.items()}
+
+
+def card_as_of(card: Card, moment: datetime) -> Card | None:
+    """The card as it was at ``moment``: its history up to then; ``None`` before it existed."""
+    if card.created_at is not None and card.created_at > moment:
+        return None
+    steps = tuple(step for step in card.steps if step.happened_at <= moment)
+    if not steps and card.created_at is None:
+        return None
+    status = next((step.to_status for step in reversed(steps) if step.to_status is not None), None)
+    return replace(
+        card,
+        steps=steps,
+        status_id=status if status is not None else card.status_id,
+        is_deleted=any(step.kind == "delete" for step in steps),
+        assignees=card.assigned_at(moment),
+        assignments=tuple(item for item in card.assignments if item[0] <= moment),
+    )
+
+
+def stuck_as_of(
+    cards: Sequence[Card],
+    types: Mapping[int, ColumnType | None],
+    thresholds: Mapping[int, StayTime],
+    calendars: Calendars,
+    options: FlowOptions,
+) -> tuple[StuckCard, ...]:
+    """What was stuck at the end of the period, judged against the same yardstick.
+
+    For a period that reaches today it is what is stuck now.
+    """
+    end = options.end
+    then = replace(options, now=end)
+    open_stays: list[tuple[Card, Interval, float]] = []
+    for original in cards:
+        card = card_as_of(original, end)
+        if card is None or card.is_deleted:
+            continue
+        windows = assignment_windows(card, then)
+        for interval in intervals_of(card, end):
+            if interval.end is not None:
+                continue
+            if windows is not None and not clip(interval.start, end, windows):
+                continue
+            open_stays.append(
+                (card, interval, interval_days(interval, card, calendars, then, windows))
+            )
+    return stuck_cards(open_stays, types, thresholds, calendars, then)
 
 
 def compute_flow(
@@ -928,6 +1195,7 @@ def compute_flow(
     per_stay: dict[int, list[float]] = defaultdict(list)
     now_in_column: Counter[int] = Counter()
     open_stays: list[tuple[Card, Interval, float]] = []
+    touched: set[int] = set()
     column_cards: list[ColumnCard] = []
     lead: list[Sample] = []
     cycle: list[Sample] = []
@@ -945,7 +1213,13 @@ def compute_flow(
             ):
                 continue
             days = interval_days(interval, card, calendars, options, windows)
-            if interval.end is None:
+            if interval.start < options.end and (
+                options.since is None or (interval.end or options.now) > options.since
+            ):
+                touched.add(interval.status_id)
+            if interval.end is None and (
+                options.people is None or options.people.takes(card.assignees, options.roles_of)
+            ):
                 now_in_column[interval.status_id] += 1
                 open_stays.append((card, interval, days))
                 column_cards.append(
@@ -962,7 +1236,7 @@ def compute_flow(
                         entered_by(card, interval),
                     )
                 )
-            elif (
+            elif interval.end is not None and (
                 in_period(interval.end, options)
                 and interval.end - interval.start >= options.misclick
             ):
@@ -987,7 +1261,7 @@ def compute_flow(
                 )
             )
 
-        finished = finish_time(card, types)
+        finished = finish_time(card, types, as_of=options.end)
         if (
             finished is None
             or not in_period(finished, options)
@@ -1003,6 +1277,16 @@ def compute_flow(
         if cycle_sample:
             cycle.append(cycle_sample)
 
+    reaches_now = options.until is None or options.until > options.now
+
+    def used(status_id: int) -> bool:
+        return (
+            status_id in touched
+            or bool(per_column[status_id])
+            or (reaches_now and now_in_column[status_id] > 0)
+        )
+
+    passes, clean, pass_events = first_pass_counts(cards, by_id, options)
     column_times = tuple(
         ColumnTime(
             status_id=column.status_id,
@@ -1015,23 +1299,19 @@ def compute_flow(
             p85=percentile(per_column[column.status_id], 0.85),
             p95=percentile(per_column[column.status_id], 0.95),
             in_column_now=now_in_column[column.status_id],
+            used=used(column.status_id),
+            passes=passes[column.status_id],
+            clean_passes=clean[column.status_id],
         )
-        for column in sorted(columns, key=lambda column: (column.is_deleted, column.position))
-        if not column.is_deleted or per_column[column.status_id] or now_in_column[column.status_id]
+        for column in sorted(columns, key=lambda column: (column.position, column.is_deleted))
+        if not column.is_deleted or used(column.status_id)
     )
-    stay_times = tuple(
-        StayTime(
-            status_id=status_id,
-            stays=len(values),
-            p5=percentile(values, 0.05),
-            p15=percentile(values, 0.15),
-            p50=percentile(values, 0.5),
-            p85=percentile(values, 0.85),
-            p95=percentile(values, 0.95),
-        )
-        for status_id, values in per_stay.items()
+    stay_times = tuple(stay_time(status_id, values) for status_id, values in per_stay.items())
+    thresholds = (
+        options.usual
+        if options.usual is not None
+        else {time.status_id: time for time in stay_times}
     )
-    thresholds = {time.status_id: time for time in stay_times}
     moves, moves_by_assignee, moves_by_mover = column_moves(cards, options)
 
     return FlowReport(
@@ -1050,6 +1330,7 @@ def compute_flow(
         throughput=weeks([finish.finished_at for finish in finishes], calendars, options),
         back_moves=back_moves(cards, by_id, options),
         stuck=stuck_cards(open_stays, types, thresholds, calendars, options),
+        stuck_at_end=stuck_as_of(cards, types, thresholds, calendars, options),
         moves=moves,
         moves_by_assignee=moves_by_assignee,
         moves_by_mover=moves_by_mover,
@@ -1059,49 +1340,5 @@ def compute_flow(
         stay_times=stay_times,
         column_cards=tuple(column_cards),
         finishes=tuple(sorted(finishes, key=lambda finish: finish.finished_at)),
-    )
-
-
-def without_columns(report: FlowReport, hidden: Collection[int]) -> FlowReport:
-    """The report with the given columns left out of every table that lists columns.
-
-    Time spent in them still counts in lead and cycle time; only rows and moves that
-    name them disappear.
-    """
-    if not hidden:
-        return report
-
-    def shown(*status_ids: int | None) -> bool:
-        return not any(status_id in hidden for status_id in status_ids)
-
-    return replace(
-        report,
-        columns=tuple(column for column in report.columns if shown(column.status_id)),
-        stay_times=tuple(time for time in report.stay_times if shown(time.status_id)),
-        column_cards=tuple(card for card in report.column_cards if shown(card.status_id)),
-        current=tuple(card for card in report.current if shown(card.status_id)),
-        moves=tuple(move for move in report.moves if shown(move.from_status, move.to_status)),
-        moves_by_assignee=tuple(
-            move for move in report.moves_by_assignee if shown(move.from_status, move.to_status)
-        ),
-        moves_by_mover=tuple(
-            move for move in report.moves_by_mover if shown(move.from_status, move.to_status)
-        ),
-        back_moves=replace(
-            report.back_moves,
-            moves=tuple(
-                move for move in report.back_moves.moves if shown(move.from_status, move.to_status)
-            ),
-        ),
-    )
-
-
-def card_without_columns(report: CardReport, hidden: Collection[int]) -> CardReport:
-    """One card's report with the given columns left out of its column tables."""
-    if not hidden:
-        return report
-    return replace(
-        report,
-        stays=tuple(stay for stay in report.stays if stay.status_id not in hidden),
-        columns=tuple(total for total in report.columns if total.status_id not in hidden),
+        first_passes=pass_events,
     )

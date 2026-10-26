@@ -35,6 +35,12 @@ export interface BarLine {
   risingIsGood: boolean;
 }
 
+export interface BarStack {
+  name: string;
+  color: string;
+  values: number[];
+}
+
 export interface BarMarker {
   name: string;
   color: string;
@@ -66,6 +72,7 @@ interface BarChartProps {
   gap?: number;
   clipOutlier?: boolean;
   height?: number;
+  stack?: BarStack;
 }
 
 const MIN_LABEL_GAP = 48;
@@ -129,6 +136,7 @@ export function BarChart({
   gap = 1,
   clipOutlier = false,
   height = 220,
+  stack,
 }: BarChartProps) {
   const [active, setActive] = useState<number | null>(null);
   const [hoverMarker, setHoverMarker] = useState<string | null>(null);
@@ -136,8 +144,9 @@ export function BarChart({
   const [pointer, setPointer] = useState<[number, number] | null>(null);
   const { setTime } = useHoverTime();
   const [container, width] = useWidth<HTMLDivElement>();
+  const above = (index: number) => stack?.values[index] ?? 0;
   const filled = bars
-    .map((bar) => bar.value)
+    .map((bar, index) => bar.value + above(index))
     .filter((value) => value > 0)
     .sort((a, b) => b - a);
   const highest = filled[0] ?? 0;
@@ -270,29 +279,44 @@ export function BarChart({
           const [left, right] = extent(index);
           const barWidth = Math.max(1, right - left - gap * 2);
           const tall = scale(bar.value);
+          const whole = scale(bar.value + above(index));
           const hot = Boolean(preview?.has(bar.key) || selectedBars?.has(bar.key));
           const dim = selectedBars !== null && !hot;
           return (
             <g key={bar.key}>
+              {stack && whole > tall && (
+                <path
+                  d={
+                    gap === 0
+                      ? `M${left},${bottom - tall}V${bottom - whole}H${right}V${bottom - tall}Z`
+                      : topRounded(left + gap, bottom - whole, barWidth, whole - tall)
+                  }
+                  fill={stack.color}
+                />
+              )}
               <path
                 d={
                   gap === 0
                     ? `M${left},${bottom}V${bottom - tall}H${right}V${bottom}Z`
-                    : topRounded(left + gap, bottom - tall, barWidth, tall)
+                    : stack && whole > tall
+                      ? `M${left + gap},${bottom}V${bottom - tall}H${
+                          left + gap + barWidth
+                        }V${bottom}Z`
+                      : topRounded(left + gap, bottom - tall, barWidth, tall)
                 }
                 fill={focusBar === bar.key ? HIGHLIGHT : color}
                 opacity={focusBar === bar.key ? 1 : dim ? 0.3 : 1}
                 stroke={hot && bar.value > 0 ? HIGHLIGHT : "none"}
                 strokeWidth={hot ? 2 : 0}
               />
-              {bar.value > top && (
+              {bar.value + above(index) > top && (
                 <text
                   className="chart-stack-count"
                   x={(left + right) / 2}
-                  y={bottom - tall - 4}
+                  y={bottom - whole - 4}
                   textAnchor="middle"
                 >
-                  {`${format(bar.value)} ↑`}
+                  {`${format(bar.value + above(index))} ↑`}
                 </text>
               )}
               {!span && (
@@ -421,6 +445,22 @@ export function BarChart({
             <span className="bar-swatch" style={{ background: color }} />
             {barName}: {format(hovered.value)}
           </span>
+          {stack && (
+            <>
+              <span className="line-tooltip-row">
+                <span className="bar-swatch" style={{ background: stack.color }} />
+                {stack.name}: {format(above(active))}
+              </span>
+              <span className="line-tooltip-row">
+                All: {format(hovered.value + above(active))}
+                {hovered.value + above(active) > 0
+                  ? `, ${Math.round(
+                      (hovered.value / (hovered.value + above(active))) * 100,
+                    )}% selected`
+                  : ""}
+              </span>
+            </>
+          )}
           {line && line.values[active] != null && (
             <span className="line-tooltip-row">
               {line.name}: {lineFormat(line.values[active] ?? 0)}

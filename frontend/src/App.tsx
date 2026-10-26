@@ -5,39 +5,67 @@ import {
   fetchMe,
   fetchProjects,
   logout,
+  PROJECTS_CHANGED_EVENT,
   UNAUTHORIZED_EVENT,
   type Me,
   type Page as PageKey,
   type ProjectSummary,
 } from "./api";
-import { Navbar, type HelpLinks } from "./components/Navbar";
-import { TaigaUrlContext } from "./components/PersonLink";
+import type { HelpLinks } from "./components/Sidebar";
+import { PeopleContext, TaigaUrlContext } from "./components/PersonLink";
+import { ProjectsContext } from "./components/ProjectPicker";
 import { Sidebar } from "./components/Sidebar";
 import { canOpen } from "./projectAccess";
+import { ActivityPage } from "./pages/ActivityPage";
+import { AnalysisPage } from "./pages/AnalysisPage";
+import { TrendsPage } from "./pages/TrendsPage";
+import { HistoryPage } from "./pages/CardsPage";
 import { HomePage, NotFoundPage } from "./pages/HomePage";
 import { LoginPage } from "./pages/LoginPage";
+import { PeoplePage, RolesPage } from "./pages/ListPages";
 import { MODULE_INFO, MODULE_OF_TYPE } from "./modules";
 import { CardPage } from "./pages/CardPage";
-import { ColumnPage, KanbanPage } from "./pages/KanbanPage";
-import { ScrumPage } from "./pages/ScrumPage";
-import { ModulePage } from "./pages/ModulePage";
-import { ProjectPage } from "./pages/ProjectPage";
+import { ColumnPage } from "./pages/KanbanPage";
 import { ProjectSettingsPage } from "./pages/ProjectSettingsPage";
 import { SearchPage } from "./pages/SearchPage";
-import { TeamPage } from "./pages/TeamPage";
-import { matchRoute, navigate, routeSlug, usePath, type Route } from "./router";
+import { matchRoute, navigate, projectPath, routeSlug, usePath, type Route } from "./router";
 import { readStored, writeStored } from "./storage";
 
-const PAGE_OF_ROUTE: Partial<Record<Route["page"], PageKey>> = {
-  project: "flow",
-  module: "flow",
-  card: "flow",
-  kanban: "flow",
-  scrum: "flow",
-  column: "flow",
-  search: "search",
-  team: "team",
-};
+function allowed(project: ProjectSummary, route: Route, viewerId: number): boolean {
+  const any = (...pages: PageKey[]) => pages.some((page) => canOpen(project, page));
+  switch (route.page) {
+    case "project":
+      return any("overview");
+    case "roles":
+      return any("directions");
+    case "people":
+      return any("people");
+    case "person":
+      return route.userId === null || route.userId === viewerId
+        ? any("my_page", "people")
+        : any("people");
+    case "trends":
+      return any("trends");
+    case "activity":
+      return any("activity");
+    case "cards":
+      return any("cards");
+    case "card":
+      return any("overview", "directions", "people", "my_page", "trends", "activity", "cards");
+    case "column":
+      return any("overview", "directions", "trends");
+    default:
+      return true;
+  }
+}
+
+function LegacySection({ slug, type }: { slug: string; type: string }) {
+  useEffect(() => {
+    writeStored(`item-type:${slug}`, JSON.stringify(type));
+    navigate(`${projectPath(slug)}${window.location.search}`, true);
+  }, [slug, type]);
+  return null;
+}
 
 function Forbidden() {
   return (
@@ -66,18 +94,63 @@ function Page({
 }) {
   const slug = routeSlug(route);
   const project = slug ? projects?.find((candidate) => candidate.slug === slug) : undefined;
-  const page = PAGE_OF_ROUTE[route.page];
   if (projects && slug && !project) {
     return <NotFoundPage />;
   }
-  if (project && page && !canOpen(project, page)) {
+  if (project && !allowed(project, route, me.id)) {
     return <Forbidden />;
   }
   switch (route.page) {
     case "home":
       return <HomePage projects={projects} error={error} />;
     case "project":
-      return <ProjectPage slug={route.slug} projects={projects} />;
+      return (
+        <AnalysisPage
+          slug={route.slug}
+          subject={{ kind: "project", id: null }}
+          projects={projects}
+          me={me}
+          taigaUrl={taigaUrl}
+        />
+      );
+    case "roles":
+      return route.roleId === null ? (
+        <RolesPage slug={route.slug} projects={projects} taigaUrl={taigaUrl} />
+      ) : (
+        <AnalysisPage
+          key={route.roleId}
+          slug={route.slug}
+          subject={{ kind: "role", id: route.roleId }}
+          projects={projects}
+          me={me}
+          taigaUrl={taigaUrl}
+        />
+      );
+    case "people":
+      return <PeoplePage slug={route.slug} projects={projects} me={me} />;
+    case "person":
+      return (
+        <AnalysisPage
+          key={route.userId ?? "me"}
+          slug={route.slug}
+          subject={{ kind: "person", id: route.userId }}
+          projects={projects}
+          me={me}
+          taigaUrl={taigaUrl}
+        />
+      );
+    case "trends":
+      return <TrendsPage slug={route.slug} projects={projects} taigaUrl={taigaUrl} />;
+    case "activity":
+      return <ActivityPage slug={route.slug} projects={projects} me={me} taigaUrl={taigaUrl} />;
+    case "cards":
+      return route.tab === "history" ? (
+        <HistoryPage slug={route.slug} projects={projects} taigaUrl={taigaUrl} />
+      ) : (
+        <SearchPage slug={route.slug} projects={projects} taigaUrl={taigaUrl} />
+      );
+    case "module":
+      return <LegacySection slug={route.slug} type={MODULE_INFO[route.module].type} />;
     case "card":
       return (
         <CardPage
@@ -88,30 +161,10 @@ function Page({
           taigaUrl={taigaUrl}
         />
       );
-    case "module":
-      return (
-        <ModulePage
-          slug={route.slug}
-          module={route.module}
-          tab={route.tab}
-          projects={projects}
-          taigaUrl={taigaUrl}
-        />
-      );
-    case "scrum":
-      return (
-        <ScrumPage
-          slug={route.slug}
-          itemType={route.itemType}
-          projects={projects}
-          taigaUrl={taigaUrl}
-        />
-      );
-    case "kanban":
-      return <KanbanPage slug={route.slug} projects={projects} />;
     case "column":
       return (
         <ColumnPage
+          key={`${route.slug}:${route.itemType}:${route.statusId}`}
           slug={route.slug}
           itemType={route.itemType}
           statusId={route.statusId}
@@ -119,10 +172,6 @@ function Page({
           taigaUrl={taigaUrl}
         />
       );
-    case "team":
-      return <TeamPage slug={route.slug} projects={projects} me={me} />;
-    case "search":
-      return <SearchPage slug={route.slug} projects={projects} taigaUrl={taigaUrl} />;
     case "project-settings":
       return <ProjectSettingsPage slug={route.slug} projects={projects} tab={route.tab} />;
     case "not-found":
@@ -130,40 +179,35 @@ function Page({
   }
 }
 
-const SECTION_TITLES = {
-  project: "Flow metrics",
-  kanban: "Kanban",
-  scrum: "Scrum",
-  team: "Team",
-  search: "Search",
+const SECTION_TITLES: Partial<Record<Route["page"], string>> = {
+  project: "Overview",
+  roles: "Roles",
+  people: "People",
+  person: "Person",
+  trends: "Trends",
+  activity: "Activity",
+  cards: "Cards",
   "project-settings": "Settings",
-} as const;
+};
 
 function titleOf(route: Route, projects: ProjectSummary[] | null): string {
-  switch (route.page) {
-    case "project":
-    case "kanban":
-    case "scrum":
-    case "team":
-    case "search":
-    case "project-settings": {
-      const name = projects?.find((project) => project.slug === route.slug)?.name ?? route.slug;
-      return `${SECTION_TITLES[route.page]} - ${name}`;
-    }
-    case "card":
-    case "module": {
-      const name = projects?.find((project) => project.slug === route.slug)?.name ?? route.slug;
-      return `${MODULE_INFO[route.module].label} - ${name}`;
-    }
-    case "column": {
-      const name = projects?.find((project) => project.slug === route.slug)?.name ?? route.slug;
-      return `${MODULE_INFO[MODULE_OF_TYPE[route.itemType]].label} - ${name}`;
-    }
-    case "not-found":
-      return "Page not found";
-    case "home":
-      return "Projects";
+  if (route.page === "home") {
+    return "Projects";
   }
+  if (route.page === "not-found") {
+    return "Page not found";
+  }
+  const name = projects?.find((project) => project.slug === route.slug)?.name ?? route.slug;
+  if (route.page === "card" || route.page === "module") {
+    return `${MODULE_INFO[route.module].label} - ${name}`;
+  }
+  if (route.page === "column") {
+    return `${MODULE_INFO[MODULE_OF_TYPE[route.itemType]].label} - ${name}`;
+  }
+  if (route.page === "person" && route.userId === null) {
+    return `My page - ${name}`;
+  }
+  return `${SECTION_TITLES[route.page] ?? "Taiga Metrics"} - ${name}`;
 }
 
 const COLLAPSED_KEY = "sidebar-collapsed";
@@ -197,14 +241,18 @@ export function App() {
       setProjects(null);
       return;
     }
-    fetchProjects()
-      .then((next) => {
-        setProjects(next);
-        setError(null);
-      })
-      .catch((reason: unknown) => {
-        setError(reason instanceof Error ? reason.message : String(reason));
-      });
+    const load = () =>
+      fetchProjects()
+        .then((next) => {
+          setProjects(next);
+          setError(null);
+        })
+        .catch((reason: unknown) => {
+          setError(reason instanceof Error ? reason.message : String(reason));
+        });
+    void load();
+    window.addEventListener(PROJECTS_CHANGED_EVENT, load);
+    return () => window.removeEventListener(PROJECTS_CHANGED_EVENT, load);
   }, [me]);
 
   useEffect(() => {
@@ -248,28 +296,40 @@ export function App() {
 
   return (
     <div className="page">
-      <Navbar
-        route={route}
-        projects={projects}
-        projectsError={error}
-        currentSlug={currentProject?.slug ?? null}
-        me={me}
-        onLogout={signOut}
-        helpLinks={helpLinks}
-      />
       <div className="layout">
-        {route.page !== "home" && (
-          <Sidebar
-            route={route}
-            project={currentProject}
-            collapsed={collapsed}
-            onToggle={toggleSidebar}
-          />
-        )}
+        <Sidebar
+          route={route}
+          project={currentProject}
+          collapsed={collapsed}
+          onToggle={toggleSidebar}
+          me={me}
+          helpLinks={helpLinks}
+          onLogout={signOut}
+        />
         <main className={`content${route.page === "home" ? " content-centered" : ""}`}>
-          <TaigaUrlContext.Provider value={taigaUrl}>
-            <Page route={route} projects={projects} error={error} taigaUrl={taigaUrl} me={me} />
-          </TaigaUrlContext.Provider>
+          <ProjectsContext.Provider value={projects}>
+            <TaigaUrlContext.Provider value={taigaUrl}>
+              <PeopleContext.Provider
+                value={
+                  currentProject
+                    ? {
+                        slug: currentProject.slug,
+                        me: me.id,
+                        others: canOpen(currentProject, "people"),
+                      }
+                    : null
+                }
+              >
+                <Page
+                  route={route}
+                  projects={projects}
+                  error={error}
+                  taigaUrl={taigaUrl}
+                  me={me}
+                />
+              </PeopleContext.Provider>
+            </TaigaUrlContext.Provider>
+          </ProjectsContext.Provider>
         </main>
       </div>
     </div>

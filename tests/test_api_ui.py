@@ -36,7 +36,15 @@ def test_projects_are_listed_with_access(client: TestClient) -> None:
     projects = response.json()
     assert [project["slug"] for project in projects] == ["alpha"]
     assert projects[0]["access"] == {
-        "pages": ["flow", "search", "team"],
+        "pages": [
+            "overview",
+            "directions",
+            "people",
+            "my_page",
+            "trends",
+            "activity",
+            "cards",
+        ],
         "scope": "all",
         "can_manage": True,
     }

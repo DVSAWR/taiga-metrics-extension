@@ -18,21 +18,26 @@ import { ScatterChart } from "../charts/ScatterChart";
 import {
   HoverTimeProvider,
   shortDays,
+  TREND_BAD,
+  TREND_GOOD,
   type AxisDay,
   type TimeGap,
   type TimeSpan,
 } from "../charts/timeAxis";
-import { formatDuration } from "../charts/format";
-import { StatTile } from "../charts/StatTile";
+import { fillWidth, formatDuration } from "../charts/format";
 import { CardTitle } from "../components/CardTitle";
+import { MetricPopup, useExclusiveMetricList } from "../components/MetricPopup";
+import { FirstPassList, ReturnEventList } from "../components/QualityLists";
 import { PeopleRefs, PersonRef } from "../components/PersonLink";
 import { Segmented } from "../components/Segmented";
 import { SortTitle, sortRows, useSort } from "../components/SortTitle";
 import { CARD_BACKGROUND, FALLBACK_MARK, PANEL_BACKGROUND, readable } from "../colors";
-import { formatDateTime, formatNumber } from "../format";
+import { firstTime, formatDateTime, formatNumber } from "../format";
 import { cardPath, columnPath, openInNewTab } from "../router";
 import { MODULE_OF_TYPE } from "../modules";
 import { TextLink } from "../components/TextLink";
+import { Icon } from "../icons";
+import { readStored, writeStored } from "../storage";
 
 export function Expandable({ label, children }: { label: string; children: ReactNode }) {
   const [open, setOpen] = useState(false);
@@ -66,15 +71,36 @@ export function MetricCard({
   tableLabel?: string;
   actions?: ReactNode;
 }) {
+  const key = `collapsed:${title}`;
+  const [collapsed, setCollapsed] = useState(() => readStored(key) === "true");
+  const toggle = () => {
+    writeStored(key, String(!collapsed));
+    setCollapsed(!collapsed);
+  };
+  const empty = !children && !table;
   return (
-    <section className="card metric-card">
+    <section className={`card metric-card${collapsed ? " collapsed" : ""}`}>
       <header className="card-header">
-        <h2>{title}</h2>
-        <p>{subtitle}</p>
-        {actions && <div className="card-actions">{actions}</div>}
+        <div className="card-title-row">
+          {!empty && (
+            <button
+              type="button"
+              className="card-collapse"
+              aria-expanded={!collapsed}
+              aria-label={collapsed ? `Show ${title}` : `Hide ${title}`}
+              title={collapsed ? "Show" : "Hide"}
+              onClick={toggle}
+            >
+              <Icon name="chevronDown" />
+            </button>
+          )}
+          <h2>{title}</h2>
+        </div>
+        {!collapsed && <p>{subtitle}</p>}
+        {actions && !collapsed && <div className="card-actions">{actions}</div>}
       </header>
-      {children && <div className="metric-body">{children}</div>}
-      {table && <Expandable label={tableLabel}>{table}</Expandable>}
+      {children && !collapsed && <div className="metric-body">{children}</div>}
+      {table && !collapsed && <Expandable label={tableLabel}>{table}</Expandable>}
     </section>
   );
 }
@@ -184,7 +210,7 @@ interface TimesOpen {
   stuck?: boolean;
 }
 
-const IN_PROGRESS_TYPES: ReadonlySet<string> = new Set(["work", "rework"]);
+const IN_PROGRESS_TYPES: ReadonlySet<string> = new Set(["work"]);
 export const OPEN_IN_PROGRESS = "in-progress";
 export const OPEN_NOW = "now";
 export const OPEN_STUCK = "stuck";
@@ -227,174 +253,438 @@ function openedTimes(open: string | null): TimesOpen | null {
   return open === OPEN_NOW ? { status: null, now: true } : null;
 }
 
+function restNote(mine: number | null, theirs: number | null): { text: string; color?: string } {
+  const selected = mine ?? 0;
+  const other = theirs ?? 0;
+  if (selected <= 0 && other <= 0) {
+    return { text: "" };
+  }
+  if (other <= 0) {
+    return { text: "only the selected stay here", color: TREND_BAD };
+  }
+  if (selected <= 0) {
+    return { text: "only the rest stay here", color: TREND_GOOD };
+  }
+  const change = Math.round(((selected - other) / other) * 100);
+  if (change === 0) {
+    return { text: "the same median as the rest" };
+  }
+  return change > 0
+    ? { text: `median ${change}% longer than the rest`, color: TREND_BAD }
+    : { text: `median ${-change}% shorter than the rest`, color: TREND_GOOD };
+}
+
 function ColumnTimes({
   open,
   setOpen,
+  statuses = null,
   ...props
 }: TabProps & {
   open: TimesOpen | null;
   setOpen: (update: (current: TimesOpen | null) => TimesOpen | null) => void;
+  statuses?: number[] | null;
 }) {
-  const { flow, slug, itemType } = props;
-  const columns = flow.report.columns;
-  const max = Math.max(0, ...columns.map((column) => column.p85 ?? column.p50 ?? 0));
+  const { flow, slug, itemType, rest } = props;
+  const announceOpen = useExclusiveMetricList(() => setOpen(() => null));
+  const columns = flow.report.columns.filter(
+    (column) => column.used && (statuses === null || statuses.includes(column.status_id)),
+  );
+  const others = new Map(rest?.report.columns.map((column) => [column.status_id, column]));
+  const max = Math.max(
+    0,
+    ...[...columns, ...(rest?.report.columns ?? [])].map(
+      (column) => column.p85 ?? column.p50 ?? 0,
+    ),
+  );
   const width = (days: number | null) => (max > 0 && days ? (days / max) * 100 : 0);
-  const toggle = (status: number | null, now: boolean) =>
+  const cameBack = new Map<number, number>();
+  for (const move of flow.report.back_moves.moves) {
+    const credited = move.credited_status ?? move.to_status;
+    cameBack.set(credited, (cameBack.get(credited) ?? 0) + move.count);
+  }
+  const allBack = columns.reduce((sum, column) => sum + (cameBack.get(column.status_id) ?? 0), 0);
+  const columnIds = new Set(columns.map((column) => column.status_id));
+  const cleanEvents = flow.report.first_passes.filter(
+    (event) => event.clean && columnIds.has(event.status_id),
+  );
+  const returnEvents = flow.report.back_moves.events.filter((event) =>
+    columnIds.has(event.credited_status),
+  );
+  const eventSlices = (statusIds: number[]): Slice[] =>
+    columns.flatMap((column) => {
+      const count = statusIds.filter((id) => id === column.status_id).length;
+      return count
+        ? [
+            {
+              key: String(column.status_id),
+              label: null,
+              name: column.name,
+              to: columnPath(slug, itemType, column.status_id),
+              color: statusColor(flow, column.status_id, false),
+              count,
+            },
+          ]
+        : [];
+    });
+  const toggle = (status: number | null, now: boolean) => {
+    if (!(open?.status === status && open.now === now)) announceOpen();
     setOpen((current) =>
       current?.status === status && current.now === now ? null : { status, now },
     );
+  };
   return (
-    <table className="table column-times">
-      <colgroup>
-        <col className="col-status" />
-        <col className="col-type" />
-        <col />
-        <col className="col-num" />
-        <col className="col-num" />
-        <col className="col-num" />
-        <col className="col-count" />
-        <col className="col-count" />
-      </colgroup>
-      <thead>
-        <tr>
-          <th>Status</th>
-          <th>Type</th>
-          <th className="bar-cell">Typical time</th>
-          <th className="num" title="Half of the cards spent less time in the status than this">
-            Median
-          </th>
-          <th
-            className="num"
-            title="85 of every 100 cards spent less time in the status than this"
-          >
-            85% within
-          </th>
-          <th
-            className="num"
-            title="95 of every 100 cards spent less time in the status than this"
-          >
-            95% within
-          </th>
-          <th className="num" title="Cards in the status right now; click to list them">
-            In it now
-          </th>
-          <th className="num" title="Cards that left the status in the period; click to list them">
-            Cards
-          </th>
-        </tr>
-      </thead>
-      <tbody>
-        {columns.map((column) => {
-          const color = readable(column.color || NEUTRAL, CARD_BACKGROUND, FALLBACK_MARK);
-          const passed = flow.report.column_cards.filter(
-            (card) => card.status_id === column.status_id && !card.now,
-          );
-          const now = flow.report.column_cards.filter(
-            (card) => card.status_id === column.status_id && card.now,
-          );
-          const isOpen = open?.status === column.status_id ? open : null;
-          const cell = (list: ColumnCard[], count: number, forNow: boolean) => (
-            <td
-              className={`num${count > 0 ? " matrix-cell" : ""}${
-                isOpen?.now === forNow ? " open" : ""
-              }`}
-              onClick={() => count > 0 && toggle(column.status_id, forNow)}
-              title={count > 0 ? "Click to list these cards" : undefined}
+    <div className="wide-table-scroll">
+      <table className="table column-times">
+        <colgroup>
+          <col className="col-status" />
+          <col className="col-type" />
+          <col />
+          <col className="col-num" />
+          <col className="col-num" />
+          <col className="col-num" />
+          <col className="col-count" />
+          <col className="col-count" />
+          <col className="col-count" />
+          <col className="col-count" />
+        </colgroup>
+        <thead>
+          <tr>
+            <th>Status</th>
+            <th>Type</th>
+            <th className="bar-cell">Typical time</th>
+            <th className="num" title="Half of the cards spent less time in the status than this">
+              Median
+            </th>
+            <th
+              className="num"
+              title="85 of every 100 cards spent less time in the status than this"
             >
-              {list.length || count ? (
-                <span className="matrix-number">{formatNumber(list.length || count)}</span>
-              ) : (
-                <span className="matrix-empty">·</span>
-              )}
-            </td>
-          );
-          return (
-            <Fragment key={column.status_id}>
-              <tr>
-                <td>
-                  <span className="column-name">
-                    <span
-                      className="column-color"
-                      style={{ background: column.color || NEUTRAL }}
-                    />
-                    <TextLink
-                      to={columnPath(slug, itemType, column.status_id)}
-                      target="_blank"
-                      rel="noreferrer"
-                      title={`${column.name}: cards in it now and how long they stay`}
-                    >
-                      {column.name}
-                    </TextLink>
-                  </span>
-                  {column.is_deleted && <span className="badge badge-accent">Removed</span>}
-                </td>
-                <td>{column.type && <span className="badge badge-muted">{column.type}</span>}</td>
-                <td
-                  className="bar-cell"
-                  title={`Median ${formatDuration(column.p50)}, 85% within ${formatDuration(
-                    column.p85,
-                  )}`}
-                >
-                  <span className="status-track">
-                    <span
-                      className="status-range"
-                      style={{ width: `${width(column.p85)}%`, background: color }}
-                    />
-                    <span
-                      className="status-median"
-                      style={{ width: `${width(column.p50)}%`, background: color }}
-                    />
-                  </span>
-                </td>
-                <td className="num">{formatDuration(column.p50)}</td>
-                <td className="num">{formatDuration(column.p85)}</td>
-                <td className="num">{formatDuration(column.p95)}</td>
-                {cell(now, column.in_column_now, true)}
-                {cell(passed, column.cards, false)}
-              </tr>
-              {isOpen && (
-                <tr className="history-row">
-                  <td colSpan={8} className="matrix-panel-cell">
-                    <ColumnCards {...props} cards={isOpen.now ? now : passed} now={isOpen.now} />
-                  </td>
-                </tr>
-              )}
-            </Fragment>
-          );
-        })}
-      </tbody>
-      <tfoot>
-        <tr className="matrix-total-row">
-          <th scope="row">Total</th>
-          <td colSpan={5} />
-          {([true, false] as const).map((forNow) => {
-            const count = flow.report.column_cards.filter((card) => card.now === forNow).length;
-            const isOpen =
-              open?.status === null && open.now === forNow && !open.progress && !open.stuck;
-            return (
+              85% within
+            </th>
+            <th
+              className="num"
+              title="95 of every 100 cards spent less time in the status than this"
+            >
+              95% within
+            </th>
+            <th className="num" title="Cards in the status right now; click to list them">
+              In it now
+            </th>
+            <th
+              className="num"
+              title="Cards that left the status in the period; click to list them"
+            >
+              Cards
+            </th>
+            <th
+              className="num"
+              title="Of the cards that left the status for the first time in the period, the share that never came back to it, by the project's return rules"
+            >
+              First time
+            </th>
+            <th
+              className="num"
+              title="Returns in the period credited to the status, by the project's return rules: whose work came back"
+            >
+              Came back
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {columns.map((column) => {
+            const color = readable(column.color || NEUTRAL, CARD_BACKGROUND, FALLBACK_MARK);
+            const passed = flow.report.column_cards.filter(
+              (card) => card.status_id === column.status_id && !card.now,
+            );
+            const now = flow.report.column_cards.filter(
+              (card) => card.status_id === column.status_id && card.now,
+            );
+            const isOpen = open?.status === column.status_id ? open : null;
+            const other = others.get(column.status_id);
+            const cell = (list: ColumnCard[], count: number, forNow: boolean) => (
               <td
-                key={String(forNow)}
-                className={`num matrix-total${count > 0 ? " matrix-cell" : ""}${
-                  isOpen ? " open" : ""
+                className={`num${count > 0 ? " matrix-cell" : ""}${
+                  isOpen?.now === forNow ? " open" : ""
                 }`}
-                onClick={() => count > 0 && toggle(null, forNow)}
-                title={count > 0 ? "Click for the split by status and the cards" : undefined}
+                onClick={() => count > 0 && toggle(column.status_id, forNow)}
+                title={count > 0 ? "Click to list these cards" : undefined}
               >
-                <span className="matrix-number">{formatNumber(count)}</span>
+                {list.length || count ? (
+                  <button
+                    type="button"
+                    className="count-open"
+                    aria-label={`Show ${column.name}: ${forNow ? "now" : "passed"}`}
+                    aria-expanded={isOpen?.now === forNow}
+                  >
+                    <span className="matrix-number">{formatNumber(list.length || count)}</span>
+                  </button>
+                ) : (
+                  <span className="matrix-empty">·</span>
+                )}
+                {rest && (
+                  <span className="rest-value" title={REST_NAME}>
+                    {formatNumber(forNow ? other?.in_column_now ?? 0 : other?.cards ?? 0)}
+                  </span>
+                )}
               </td>
             );
+            const note = restNote(column.p50, other?.p50 ?? null);
+            const restLine = (value: number | null) =>
+              rest && (
+                <span className="rest-value" title={REST_NAME}>
+                  {formatDuration(value)}
+                </span>
+              );
+            return (
+              <Fragment key={column.status_id}>
+                <tr>
+                  <td>
+                    <span className="column-name">
+                      <span
+                        className="column-color"
+                        style={{ background: column.color || NEUTRAL }}
+                      />
+                      <TextLink
+                        to={columnPath(slug, itemType, column.status_id)}
+                        target="_blank"
+                        rel="noreferrer"
+                        title={`${column.name}: cards in it now and how long they stay`}
+                      >
+                        {column.name}
+                      </TextLink>
+                    </span>
+                    {column.is_deleted && <span className="badge badge-accent">Removed</span>}
+                  </td>
+                  <td>
+                    {column.type && <span className="badge badge-muted">{column.type}</span>}
+                  </td>
+                  <td
+                    className="bar-cell"
+                    title={`Median ${formatDuration(column.p50)}, 85% within ${formatDuration(
+                      column.p85,
+                    )}`}
+                  >
+                    <span className="status-track">
+                      <span
+                        className="status-range"
+                        style={{ ...fillWidth(width(column.p85)), background: color }}
+                      />
+                      <span
+                        className="status-median"
+                        style={{ ...fillWidth(width(column.p50)), background: color }}
+                      />
+                    </span>
+                    {rest && (
+                      <>
+                        <span
+                          className="status-track status-track-rest"
+                          title={`${REST_NAME}: median ${formatDuration(
+                            other?.p50 ?? null,
+                          )}, 85% within ${formatDuration(other?.p85 ?? null)}`}
+                        >
+                          <span
+                            className="status-range"
+                            style={{
+                              ...fillWidth(width(other?.p85 ?? null)),
+                              background: REST_COLOR,
+                            }}
+                          />
+                          <span
+                            className="status-median"
+                            style={{
+                              ...fillWidth(width(other?.p50 ?? null)),
+                              background: REST_COLOR,
+                            }}
+                          />
+                        </span>
+                        {note.text && (
+                          <span className="rest-note" style={{ color: note.color }}>
+                            {note.text}
+                          </span>
+                        )}
+                      </>
+                    )}
+                  </td>
+                  <td className="num">
+                    {formatDuration(column.p50)}
+                    {restLine(other?.p50 ?? null)}
+                  </td>
+                  <td className="num">
+                    {formatDuration(column.p85)}
+                    {restLine(other?.p85 ?? null)}
+                  </td>
+                  <td className="num">
+                    {formatDuration(column.p95)}
+                    {restLine(other?.p95 ?? null)}
+                  </td>
+                  {cell(now, column.in_column_now, true)}
+                  {cell(passed, column.cards, false)}
+                  <td
+                    className="num"
+                    title={`${column.clean_passes} of ${column.passes} first passes never came back`}
+                  >
+                    {column.clean_passes > 0 ? (
+                      <MetricPopup
+                        label={`Show clean first passes of ${column.name}`}
+                        content={
+                          <FirstPassList
+                            {...props}
+                            title={`${column.name}: clean first passes`}
+                            events={flow.report.first_passes.filter(
+                              (event) => event.clean && event.status_id === column.status_id,
+                            )}
+                          />
+                        }
+                      >
+                        {formatNumber(column.clean_passes)}
+                      </MetricPopup>
+                    ) : (
+                      "·"
+                    )}
+                    <span className="quality-percent">
+                      {firstTime(column.passes, column.clean_passes)}
+                    </span>
+                    {rest && (
+                      <span className="rest-value" title={REST_NAME}>
+                        {firstTime(other?.passes ?? 0, other?.clean_passes ?? 0)}
+                      </span>
+                    )}
+                  </td>
+                  <td
+                    className={`num${cameBack.get(column.status_id) ? " back-cell" : ""}`}
+                    title="Returns credited to this status in the period"
+                  >
+                    {cameBack.get(column.status_id) ? (
+                      <MetricPopup
+                        label={`Show returns credited to ${column.name}`}
+                        content={
+                          <ReturnEventList
+                            {...props}
+                            title={`${column.name}: returns`}
+                            events={flow.report.back_moves.events.filter(
+                              (event) => event.credited_status === column.status_id,
+                            )}
+                          />
+                        }
+                      >
+                        {formatNumber(cameBack.get(column.status_id) ?? 0)}
+                      </MetricPopup>
+                    ) : (
+                      "·"
+                    )}
+                  </td>
+                </tr>
+                {isOpen && (
+                  <tr className="history-row">
+                    <td colSpan={10} className="matrix-panel-cell">
+                      <ColumnCards {...props} cards={isOpen.now ? now : passed} now={isOpen.now} />
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
+            );
           })}
-        </tr>
-        {open?.status === null && (
-          <StatusTotals
-            {...props}
-            now={open.now}
-            progress={Boolean(open.progress)}
-            stuck={Boolean(open.stuck)}
-          />
-        )}
-      </tfoot>
-    </table>
+        </tbody>
+        <tfoot>
+          <tr className="matrix-total-row">
+            <th scope="row">Total</th>
+            <td colSpan={5} />
+            {([true, false] as const).map((forNow) => {
+              const count = flow.report.column_cards.filter((card) => card.now === forNow).length;
+              const isOpen =
+                open?.status === null && open.now === forNow && !open.progress && !open.stuck;
+              return (
+                <td
+                  key={String(forNow)}
+                  className={`num matrix-total${count > 0 ? " matrix-cell" : ""}${
+                    isOpen ? " open" : ""
+                  }`}
+                  onClick={() => count > 0 && toggle(null, forNow)}
+                  title={count > 0 ? "Click for the split by status and the cards" : undefined}
+                >
+                  {count > 0 ? (
+                    <button
+                      type="button"
+                      className="count-open"
+                      aria-label={`Show all cards ${forNow ? "now" : "passed"}`}
+                      aria-expanded={isOpen}
+                    >
+                      <span className="matrix-number">{formatNumber(count)}</span>
+                    </button>
+                  ) : (
+                    <span className="matrix-number">0</span>
+                  )}
+                </td>
+              );
+            })}
+            <td className="num">
+              {cleanEvents.length ? (
+                <MetricPopup
+                  label="Show all clean first passes"
+                  content={
+                    <>
+                      <DonutSplit
+                        slices={eventSlices(cleanEvents.map((event) => event.status_id))}
+                        total={cleanEvents.length}
+                        caption="passes"
+                      />
+                      <FirstPassList
+                        {...props}
+                        title="All clean first passes"
+                        events={cleanEvents}
+                      />
+                    </>
+                  }
+                >
+                  {formatNumber(columns.reduce((sum, column) => sum + column.clean_passes, 0))}
+                </MetricPopup>
+              ) : (
+                "·"
+              )}
+              <span className="quality-percent">
+                {firstTime(
+                  columns.reduce((sum, column) => sum + column.passes, 0),
+                  columns.reduce((sum, column) => sum + column.clean_passes, 0),
+                )}
+              </span>
+            </td>
+            <td className="num">
+              {allBack ? (
+                <MetricPopup
+                  label="Show all return events"
+                  content={
+                    <>
+                      <DonutSplit
+                        slices={eventSlices(returnEvents.map((event) => event.credited_status))}
+                        total={returnEvents.length}
+                        caption="returns"
+                      />
+                      <ReturnEventList
+                        {...props}
+                        title="All return events"
+                        events={returnEvents}
+                      />
+                    </>
+                  }
+                >
+                  {formatNumber(allBack)}
+                </MetricPopup>
+              ) : (
+                "·"
+              )}
+            </td>
+          </tr>
+          {open?.status === null && (
+            <StatusTotals
+              {...props}
+              now={open.now}
+              progress={Boolean(open.progress)}
+              stuck={Boolean(open.stuck)}
+            />
+          )}
+        </tfoot>
+      </table>
+    </div>
   );
 }
 
@@ -438,12 +728,12 @@ function StatusTotals({
   return (
     <>
       <tr id={OPENED_CARDS} className="history-row donut-row">
-        <td colSpan={8}>
+        <td colSpan={10}>
           <DonutSplit slices={slices} total={total} caption="cards" />
         </td>
       </tr>
       <tr className="history-row">
-        <td colSpan={8} className="matrix-panel-cell glued">
+        <td colSpan={10} className="matrix-panel-cell glued">
           <ColumnCards {...props} cards={cards} now={now} withStatus />
         </td>
       </tr>
@@ -864,12 +1154,19 @@ function Histogram({
   distribution,
   took,
   title,
+  embedded,
   ...props
-}: TabProps & { distribution: Distribution; took: string; title: string }) {
+}: TabProps & {
+  distribution: Distribution;
+  took: string;
+  title: string;
+  embedded?: DistributionView;
+}) {
   const { slug, itemType } = props;
   const [selection, choose, setSelection] = useSelection();
   const [focus, setFocus] = useState<string | null>(null);
-  const [view, setView] = useState<DistributionView>("shape");
+  const [ownView, setView] = useState<DistributionView>("shape");
+  const view = embedded ?? ownView;
   const samples = distribution.samples;
   const values = samples.map((sample) => sample.days);
   const few = values.length < DOT_PLOT_BELOW;
@@ -935,24 +1232,8 @@ function Histogram({
         ? "Each dot is a finished card, placed by the time it took; fewer than 30 cards are too few for a histogram. Click a dot for the card, a line for the cards within it."
         : "How many cards finished within each span of time. Click a bar for its cards, a line for the cards within it.";
 
-  return (
-    <MetricCard
-      title={title}
-      subtitle={subtitle}
-      actions={
-        values.length > 0 && (
-          <Segmented
-            label="View"
-            options={DISTRIBUTION_VIEWS}
-            value={view}
-            onChange={(next) => {
-              setSelection(null);
-              setView(next);
-            }}
-          />
-        )
-      }
-    >
+  const body = (
+    <>
       {values.length === 0 ? (
         <Empty>No finished cards in this period.</Empty>
       ) : (
@@ -1068,6 +1349,30 @@ function Histogram({
           )}
         </>
       )}
+    </>
+  );
+  if (embedded) {
+    return body;
+  }
+  return (
+    <MetricCard
+      title={title}
+      subtitle={subtitle}
+      actions={
+        values.length > 0 && (
+          <Segmented
+            label="View"
+            options={DISTRIBUTION_VIEWS}
+            value={view}
+            onChange={(next) => {
+              setSelection(null);
+              setView(next);
+            }}
+          />
+        )
+      }
+    >
+      {body}
     </MetricCard>
   );
 }
@@ -1077,7 +1382,11 @@ interface TabProps {
   slug: string;
   itemType: ItemType;
   taigaUrl: string | null;
+  rest?: FlowResponse | null;
 }
+
+export const REST_COLOR = "#c5c9d6";
+export const REST_NAME = "The rest";
 
 const DELETED = "Deleted";
 const CREATED = "Created";
@@ -1144,13 +1453,6 @@ function plural(count: number, one: string, many: string): string {
 
 export type Bucket = "day" | "week" | "month" | "year";
 
-const BUCKETS: { value: Bucket; label: string }[] = [
-  { value: "day", label: "Day" },
-  { value: "week", label: "Week" },
-  { value: "month", label: "Month" },
-  { value: "year", label: "Year" },
-];
-
 export function localDay(moment: string | Date, zone: string): string {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: zone,
@@ -1212,23 +1514,9 @@ function percentile(values: number[], share: number): number | null {
   return sorted[Math.min(rank, sorted.length) - 1] ?? null;
 }
 
-const AVERAGE_OVER: Record<Bucket, number> = { day: 5, week: 4, month: 3, year: 0 };
-const AVERAGE_UNIT: Record<Bucket, string> = {
-  day: "working days",
-  week: "weeks",
-  month: "months",
-  year: "years",
-};
 const JUMP_LEAST = 5;
 const JUMP_SHARE = 0.1;
 const MAX_JUMPS = 3;
-
-type ThroughputView = "bars" | "cumulative";
-
-const THROUGHPUT_VIEWS: { value: ThroughputView; label: string }[] = [
-  { value: "bars", label: "Bars" },
-  { value: "cumulative", label: "Cumulative" },
-];
 
 function jumpsOf(flow: FlowResponse): { at: number; count: number; label: string }[] {
   const byDay = new Map<string, number[]>();
@@ -1315,14 +1603,10 @@ export function trendOf(
 }
 
 function Throughput({
-  bucket,
-  onBucket,
   span,
   openAll,
   ...props
 }: TabProps & {
-  bucket: Bucket;
-  onBucket: (bucket: Bucket) => void;
   span: TimeSpan;
   openAll: boolean;
 }) {
@@ -1337,25 +1621,8 @@ function Throughput({
       });
     }
   }, [openAll]);
-  const [view, setView] = useState<ThroughputView>("bars");
-  const [focus, setFocus] = useState<string | null>(null);
   const finishes = flow.report.finishes;
-  const over = AVERAGE_OVER[bucket];
-  const trend = trendOf(
-    flow,
-    bucket,
-    finishes.map((finish, index) => ({ moment: finish.finished_at, value: index })),
-  );
-  const counts = trend.values.map((list) => list.length);
   const total = finishes.length;
-  const average = counts.length ? total / counts.length : null;
-  const unit = bucket === "day" ? "working day" : bucket;
-  const moving = counts.map((_, index) => {
-    const window = counts.slice(Math.max(0, index - over + 1), index + 1);
-    return window.reduce((sum, value) => sum + value, 0) / window.length;
-  });
-  const hasAverage = over > 0 && counts.length > 1;
-  const averageName = `Average of the last ${AVERAGE_UNIT[bucket]}`;
   const dateFormat = new Intl.DateTimeFormat("en-GB", {
     day: "2-digit",
     month: "short",
@@ -1365,75 +1632,22 @@ function Throughput({
   const lead = new Map(
     flow.report.lead_time.samples.map((sample) => [sample.item_id, sample.days]),
   );
-  const barOf = new Map<string, string>();
-  trend.points.forEach((point, index) => {
-    for (const item of trend.values[index] ?? []) {
-      const finish = finishes[item];
-      if (finish) {
-        barOf.set(String(finish.item_id), point.key);
-      }
-    }
-  });
   const chosen = selection
     ? finishes.filter((finish) => selection.keys.has(String(finish.item_id)))
     : [];
-  const selectedBars = selection
-    ? new Set(chosen.flatMap((finish) => barOf.get(String(finish.item_id)) ?? []))
-    : null;
   const countLabel = plural(total, "card finished", "cards finished");
   const chooseAll = () =>
     choose({ id: "all", keys: keysOf(finishes), caption: `All ${countLabel}` });
-  const titleOf = (label: string) => `${bucket === "week" ? "Week of " : ""}${label}`;
   return (
     <MetricCard
       title="Throughput"
-      subtitle={
-        <>
-          {view === "bars" ? (
-            <>
-              Cards finished per {unit}
-              {average === null
-                ? ""
-                : `: ${average.toFixed(1)} on average, ${formatNumber(total)} in all`}
-              . Days and weeks follow the project calendar in {flow.timezone}; weeks start on
-              Monday
-              {bucket === "day" ? ", and only working days are shown" : ""}. A bar far above the
-              rest is cut short, its value marked with an arrow. Click a bar for its cards.
-            </>
-          ) : (
-            <>
-              Cards finished so far, {formatNumber(total)} in all. The line climbs with every
-              finish: flat stretches are pauses, steep ones bursts; the largest are labelled.
-            </>
-          )}
-        </>
-      }
-      actions={
-        <div className="card-actions-row">
-          {view === "bars" && (
-            <BucketSwitch
-              bucket={bucket}
-              onBucket={(next) => {
-                setSelection(null);
-                onBucket(next);
-              }}
-            />
-          )}
-          <Segmented
-            label="View"
-            options={THROUGHPUT_VIEWS}
-            value={view}
-            onChange={(next) => {
-              setSelection(null);
-              setView(next);
-            }}
-          />
-        </div>
-      }
+      subtitle={`Cards finished so far, ${formatNumber(
+        total,
+      )} in all. The line climbs with every finish: flat stretches are pauses, steep ones bursts; the largest are labelled. Click the line for the cards.`}
     >
-      {trend.points.length === 0 ? (
+      {total === 0 ? (
         <Empty>No finished cards yet.</Empty>
-      ) : view === "cumulative" ? (
+      ) : (
         <div className="metric-chart">
           <CumulativeChart
             count={countLabel}
@@ -1449,51 +1663,6 @@ function Throughput({
             }
           />
         </div>
-      ) : (
-        <div className="metric-chart">
-          <BarChart
-            bars={trend.points.map((point, index) => ({
-              key: point.key,
-              label: point.label,
-              title: titleOf(point.label),
-              value: counts[index] ?? 0,
-              from: zoneMidnight(point.key, flow.timezone),
-              to: zoneMidnight(nextBucket(point.key, bucket), flow.timezone),
-            }))}
-            span={span}
-            color={CARD_DOT}
-            barName="Finished"
-            line={
-              hasAverage ? { name: averageName, values: moving, risingIsGood: true } : undefined
-            }
-            legend={[
-              { name: "Finished", color: CARD_DOT, kind: "bar" },
-              ...(hasAverage
-                ? [{ name: averageName, color: "", kind: "trend" as const, risingIsGood: true }]
-                : []),
-            ]}
-            clipOutlier
-            count={countLabel}
-            format={(value) => formatNumber(Math.round(value))}
-            lineFormat={(value) => value.toFixed(1)}
-            crossX={(time) => dateFormat.format(new Date(time))}
-            selectedId={selection?.id ?? null}
-            selectedBars={selectedBars}
-            focusBar={focus === null ? null : barOf.get(focus) ?? null}
-            onBar={(bar) => {
-              const index = trend.points.findIndex((point) => point.key === bar.key);
-              const cards = (trend.values[index] ?? []).flatMap((item) => finishes[item] ?? []);
-              choose({
-                id: bar.key,
-                keys: keysOf(cards),
-                caption: `${plural(cards.length, "card", "cards")} finished ${
-                  bucket === "week" ? "in the week of" : bucket === "day" ? "on" : "in"
-                } ${bar.label}`,
-              });
-            }}
-            onAll={chooseAll}
-          />
-        </div>
       )}
       {selection && (
         <div id={openAll && selection.id === "all" ? OPENED_CARDS : undefined}>
@@ -1505,7 +1674,7 @@ function Throughput({
             }))}
             caption={selection.caption}
             took="Lead time"
-            onFocus={setFocus}
+            onFocus={() => undefined}
           />
         </div>
       )}
@@ -1513,156 +1682,130 @@ function Throughput({
   );
 }
 
-function BucketSwitch({
-  bucket,
-  onBucket,
-}: {
-  bucket: Bucket;
-  onBucket: (bucket: Bucket) => void;
-}) {
-  return <Segmented label="Group by" options={BUCKETS} value={bucket} onChange={onBucket} />;
-}
-
 function sameAsLeadNote(flow: FlowResponse): string {
-  const first = flow.report.columns[0];
+  const first = flow.report.columns.find((column) => !column.is_deleted);
   return first?.type === "work"
     ? `Cycle time is the same as lead time here: cards start in ${first.name}, which is typed Work, so their work starts at creation.`
     : "Cycle time is the same as lead time here: every finished card was in a Work status from its creation.";
 }
 
-export function OverviewTab(props: TabProps) {
-  const { flow } = props;
-  const { report } = flow;
-  const weeks = report.throughput;
-  const perWeek =
-    weeks.length > 0 ? weeks.reduce((sum, week) => sum + week.finished, 0) / weeks.length : null;
-  const [chosenBucket, setBucket] = useState<Bucket | null>(null);
+export function StatusTimesCard({
+  statuses = null,
+  ...props
+}: TabProps & { statuses?: number[] | null }) {
   const [opened] = useState(() => new URLSearchParams(window.location.search).get("open"));
   const [timesOpen, setTimesOpen] = useState<TimesOpen | null>(() => openedTimes(opened));
-  const timesCard = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (opened === OPEN_FINISHED || openedTimes(opened)) {
+    if (openedTimes(opened)) {
       return scrollWhenSettled(OPENED_CARDS);
     }
     return undefined;
   }, [opened]);
-  const showInProgress = () => {
-    setTimesOpen((current) =>
-      current?.progress ? null : { status: null, now: true, progress: true },
-    );
-    timesCard.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-  };
-  const backShare =
-    report.back_moves.cards_moved > 0
-      ? Math.round((report.back_moves.cards_with_back_moves / report.back_moves.cards_moved) * 100)
-      : null;
+  return (
+    <MetricCard
+      title="Time in statuses"
+      subtitle="How long a card spends in each status, all its visits added up, in Taiga's status order; the share that passed it the first time, and how many returns came back to it (whose work did not pass), by the return settings. Click a status for its page, a number under In it now or Cards for the cards."
+    >
+      <ColumnTimes {...props} statuses={statuses} open={timesOpen} setOpen={setTimesOpen} />
+    </MetricCard>
+  );
+}
+
+type SpeedView = "dots" | DistributionView;
+
+const SPEED_VIEWS: { value: SpeedView; label: string }[] = [
+  { value: "dots", label: "Over time" },
+  { value: "shape", label: "Distribution" },
+  { value: "cumulative", label: "Cumulative %" },
+];
+
+const MEASURES: { value: "lead" | "cycle"; label: string }[] = [
+  { value: "lead", label: "Lead time" },
+  { value: "cycle", label: "Cycle time" },
+];
+
+export function ThroughputCard(props: TabProps) {
+  const [opened] = useState(() => new URLSearchParams(window.location.search).get("open"));
+  useEffect(() => {
+    if (opened === OPEN_FINISHED) {
+      return scrollWhenSettled(OPENED_CARDS);
+    }
+    return undefined;
+  }, [opened]);
+  return (
+    <HoverTimeProvider>
+      <Throughput {...props} span={timeSpan(props.flow)} openAll={opened === OPEN_FINISHED} />
+    </HoverTimeProvider>
+  );
+}
+
+export function SpeedCard(props: TabProps) {
+  const { flow } = props;
+  const { report } = flow;
+  const [measure, setMeasure] = useState<"lead" | "cycle">(() =>
+    readStored("speed-measure") === "cycle" ? "cycle" : "lead",
+  );
+  const [view, setView] = useState<SpeedView>(() =>
+    readStored("speed-view") === "shape"
+      ? "shape"
+      : readStored("speed-view") === "cumulative"
+        ? "cumulative"
+        : "dots",
+  );
   const sameCycle =
     report.lead_time.samples.length > 0 && sameSamples(report.lead_time, report.cycle_time);
-  const span = timeSpan(flow);
-  const bucket = chosenBucket ?? "day";
-  const dotsHint =
-    "Each dot is a finished card: when it finished and how long it took. Click a dot for the card, a line or a count for the cards in it.";
+  const shown = measure === "cycle" && !sameCycle ? report.cycle_time : report.lead_time;
+  const took = measure === "cycle" && !sameCycle ? "Cycle time" : "Lead time";
+  return (
+    <HoverTimeProvider>
+      <MetricCard
+        title="Speed"
+        subtitle={
+          measure === "lead"
+            ? "Lead time: from creation to Done, one dot per finished card."
+            : sameCycle
+              ? sameAsLeadNote(flow)
+              : "Cycle time: from the first Work status to Done, one dot per finished card."
+        }
+        actions={
+          <div className="card-actions-row">
+            <Segmented
+              label="Measure"
+              options={MEASURES}
+              value={measure}
+              onChange={(next) => {
+                writeStored("speed-measure", next);
+                setMeasure(next);
+              }}
+            />
+            <Segmented
+              label="View"
+              options={SPEED_VIEWS}
+              value={view}
+              onChange={(next) => {
+                writeStored("speed-view", next);
+                setView(next);
+              }}
+            />
+          </div>
+        }
+      >
+        {view === "dots" ? (
+          <DistributionChart {...props} distribution={shown} took={took} span={timeSpan(flow)} />
+        ) : (
+          <Histogram {...props} title={took} distribution={shown} took={took} embedded={view} />
+        )}
+      </MetricCard>
+    </HoverTimeProvider>
+  );
+}
 
+export function OverviewTab(props: TabProps) {
   return (
     <div className="flow-metrics">
-      <div className="stat-row">
-        <StatTile
-          label="Lead time, median"
-          value={formatDuration(report.lead_time.p50)}
-          detail={`85% within ${formatDuration(report.lead_time.p85)}`}
-        />
-        <StatTile
-          label="Cycle time, median"
-          value={formatDuration(report.cycle_time.p50)}
-          detail={
-            sameCycle ? "same as lead time" : `85% within ${formatDuration(report.cycle_time.p85)}`
-          }
-        />
-        <StatTile
-          label="Finished per week"
-          value={perWeek === null ? "-" : perWeek.toFixed(1)}
-          detail={`${formatNumber(report.finished)} in the period`}
-        />
-        <StatTile
-          label="In progress now"
-          value={
-            report.in_progress > 0 ? (
-              <button
-                type="button"
-                className={`legend-link stat-value-link${timesOpen?.progress ? " active" : ""}`}
-                title="Show these cards in Time in statuses"
-                onClick={showInProgress}
-              >
-                {formatNumber(report.in_progress)}
-              </button>
-            ) : (
-              formatNumber(report.in_progress)
-            )
-          }
-          detail={`of ${plural(report.cards, "card", "cards")}`}
-        />
-        <StatTile
-          label="Went back"
-          value={backShare === null ? "-" : `${backShare}%`}
-          detail={`${formatNumber(report.back_moves.cards_with_back_moves)} of ${plural(
-            report.back_moves.cards_moved,
-            "moved card",
-            "moved cards",
-          )}`}
-        />
-      </div>
-
-      <MetricCard
-        title="Time in statuses"
-        subtitle="How long a card spends in each status, all its visits added up, in Taiga's status order. Passing through in under 5 minutes is left out. Click a status for its page, a number under In it now or Cards for the cards, a Total for the split by status."
-      >
-        <div ref={timesCard} className="scroll-anchor" />
-        <ColumnTimes {...props} open={timesOpen} setOpen={setTimesOpen} />
-      </MetricCard>
-
-      <HoverTimeProvider>
-        <MetricCard title="Lead time" subtitle={`From creation to Done. ${dotsHint}`}>
-          <DistributionChart
-            {...props}
-            distribution={report.lead_time}
-            took="Lead time"
-            span={span}
-          />
-        </MetricCard>
-        {sameCycle ? (
-          <MetricCard title="Cycle time" subtitle={sameAsLeadNote(flow)} />
-        ) : (
-          <MetricCard
-            title="Cycle time"
-            subtitle={`From the first Work status to Done${
-              report.cycle_time.samples.length < report.lead_time.samples.length
-                ? `; ${report.cycle_time.samples.length} of ${report.lead_time.samples.length} finished cards went through a Work status, the others are not counted`
-                : ""
-            }. ${dotsHint}`}
-          >
-            <DistributionChart
-              {...props}
-              distribution={report.cycle_time}
-              took="Cycle time"
-              span={span}
-            />
-          </MetricCard>
-        )}
-        <Histogram
-          {...props}
-          title={sameCycle ? "Lead time distribution" : "Cycle time distribution"}
-          distribution={sameCycle ? report.lead_time : report.cycle_time}
-          took={sameCycle ? "Lead time" : "Cycle time"}
-        />
-
-        <Throughput
-          {...props}
-          bucket={bucket}
-          onBucket={setBucket}
-          span={span}
-          openAll={opened === OPEN_FINISHED}
-        />
-      </HoverTimeProvider>
+      <StatusTimesCard {...props} />
+      <ThroughputCard {...props} />
+      <SpeedCard {...props} />
     </div>
   );
 }
@@ -1677,21 +1820,32 @@ function pairName(flow: FlowResponse, source: number | null, target: number | nu
 type Side = "out" | "in";
 type EventSide = Side | "pair" | null;
 
-function eventRows(moves: MoveCount[]): { move: MoveCount; event: MoveEvent }[] {
-  return moves
+function eventRows(
+  moves: MoveCount[],
+  uniqueCards = false,
+): { move: MoveCount; event: MoveEvent }[] {
+  const rows = moves
     .flatMap((move) => move.events.map((event) => ({ move, event })))
     .sort((a, b) => b.event.happened_at.localeCompare(a.event.happened_at));
+  if (!uniqueCards) return rows;
+  const seen = new Set<number>();
+  return rows.filter(({ event }) => {
+    if (seen.has(event.item_id)) return false;
+    seen.add(event.item_id);
+    return true;
+  });
 }
 
 function MoveEvents({
   moves,
   side,
+  uniqueCards = false,
   ...props
-}: TabProps & { moves: MoveCount[]; side: EventSide }) {
+}: TabProps & { moves: MoveCount[]; side: EventSide; uniqueCards?: boolean }) {
   const { flow, slug, itemType, taigaUrl } = props;
   const [sort, onSort] = useSort();
   const order = statusOrder(flow);
-  const rows = sortRows(eventRows(moves), sort, ({ move, event }, key) => {
+  const rows = sortRows(eventRows(moves, uniqueCards), sort, ({ move, event }, key) => {
     switch (key) {
       case "when":
         return event.happened_at;
@@ -1727,7 +1881,14 @@ function MoveEvents({
             <th>{title(side === "out" ? "To" : side === "in" ? "From" : "Change", "status")}</th>
           )}
           <th>{title("Assigned", "assigned")}</th>
-          <th>{title("Moved by", "user")}</th>
+          <th>
+            {title(
+              moves.length > 0 && moves.every((move) => move.from_status === null)
+                ? "Created by"
+                : "Moved by",
+              "user",
+            )}
+          </th>
         </tr>
       </thead>
       <tbody>
@@ -1793,7 +1954,7 @@ function MoveEvents({
 
 const NEUTRAL = "#a9aabc";
 
-function statusColor(flow: FlowResponse, id: number | null, deleted: boolean): string {
+export function statusColor(flow: FlowResponse, id: number | null, deleted: boolean): string {
   const raw =
     id === null
       ? deleted
@@ -1803,7 +1964,7 @@ function statusColor(flow: FlowResponse, id: number | null, deleted: boolean): s
   return readable(raw, PANEL_BACKGROUND, FALLBACK_MARK);
 }
 
-interface Slice {
+export interface Slice {
   key: string;
   label: ReactNode;
   name: string;
@@ -1871,7 +2032,7 @@ function Donut({
   );
 }
 
-function DonutSplit({
+export function DonutSplit({
   slices,
   total,
   caption,
@@ -1907,6 +2068,120 @@ function DonutSplit({
           </li>
         ))}
       </ul>
+    </div>
+  );
+}
+
+export interface ListedCard {
+  item_id: number;
+  ref: number | null;
+  subject: string;
+  status_id: number | null;
+  days: number | null;
+  assignees: number[];
+  is_deleted?: boolean;
+}
+
+export function CardsBreakdown({
+  flow,
+  slug,
+  itemType,
+  taigaUrl,
+  cards,
+  caption,
+  timeLabel,
+  showSplit = true,
+}: {
+  flow: FlowResponse;
+  slug: string;
+  itemType: ItemType;
+  taigaUrl: string | null;
+  cards: ListedCard[];
+  caption: string;
+  timeLabel: string;
+  showSplit?: boolean;
+}) {
+  const [sort, onSort] = useSort();
+  const names = new Map(flow.report.columns.map((column) => [column.status_id, column.name]));
+  const counts = new Map<number | null, number>();
+  for (const card of cards) {
+    counts.set(card.status_id, (counts.get(card.status_id) ?? 0) + 1);
+  }
+  const order = new Map(flow.report.columns.map((column, index) => [column.status_id, index]));
+  const slices: Slice[] = [...counts.entries()]
+    .sort((a, b) => (order.get(a[0] ?? -1) ?? 999) - (order.get(b[0] ?? -1) ?? 999))
+    .map(([status, count]) => ({
+      key: String(status),
+      label: null,
+      name: status === null ? "No status" : names.get(status) ?? `Status ${status}`,
+      to: statusLink(slug, itemType, status),
+      color: statusColor(flow, status, false),
+      count,
+    }));
+  const rows = sortRows(
+    [...cards].sort((a, b) => (b.days ?? 0) - (a.days ?? 0)),
+    sort,
+    (card, key) =>
+      key === "card"
+        ? card.ref ?? card.item_id
+        : key === "status"
+          ? card.status_id
+          : key === "assigned"
+            ? peopleText(flow, card.assignees)
+            : card.days,
+  );
+  const title = (label: string, key: string) => (
+    <SortTitle label={label} sortKey={key} sort={sort} onSort={onSort} className="table-sort" />
+  );
+  if (cards.length === 0) {
+    return <Empty>No cards.</Empty>;
+  }
+  return (
+    <div className="cards-breakdown">
+      {showSplit && <DonutSplit slices={slices} total={cards.length} caption={caption} />}
+      <table className="table cards-breakdown-table">
+        <thead>
+          <tr>
+            <th>{title("Card", "card")}</th>
+            <th>{title("Status", "status")}</th>
+            <th className="num">{title(timeLabel, "time")}</th>
+            <th>{title("Assigned", "assigned")}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((card) => (
+            <tr key={card.item_id}>
+              <td>
+                <CardTitle
+                  slug={slug}
+                  itemType={itemType}
+                  itemId={card.item_id}
+                  cardRef={card.ref}
+                  subject={card.subject}
+                  isDeleted={card.is_deleted ?? false}
+                  taigaUrl={taigaUrl}
+                />
+              </td>
+              <td>
+                {card.status_id === null ? (
+                  <span className="muted-inline">-</span>
+                ) : (
+                  <ColumnLabel
+                    flow={flow}
+                    id={card.status_id}
+                    empty="-"
+                    to={columnPath(slug, itemType, card.status_id)}
+                  />
+                )}
+              </td>
+              <td className="num">{formatDuration(card.days)}</td>
+              <td>
+                <PeopleRefs directory={flow} ids={card.assignees} nobody="Unassigned" />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -1990,10 +2265,18 @@ function sameOpen(a: Open, b: Open): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
-function MoveMatrix(props: TabProps) {
+type MoveMeasure = "cards" | "moves";
+
+const MOVE_MEASURES: { value: MoveMeasure; label: string }[] = [
+  { value: "cards", label: "Cards" },
+  { value: "moves", label: "Moves" },
+];
+
+function MoveMatrix({ measure, ...props }: TabProps & { measure: MoveMeasure }) {
   const { flow, slug, itemType } = props;
   const { columns, moves } = flow.report;
   const [open, setOpen] = useState<Open>(null);
+  const announceOpen = useExclusiveMetricList(() => setOpen(null));
   const scroller = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState<number | null>(null);
   useEffect(() => {
@@ -2005,10 +2288,12 @@ function MoveMatrix(props: TabProps) {
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
-  const toggle = (next: Open) => setOpen((current) => (sameOpen(current, next) ? null : next));
+  const toggle = (next: Open) => {
+    if (!sameOpen(open, next)) announceOpen();
+    setOpen((current) => (sameOpen(current, next) ? null : next));
+  };
   const count = new Map(moves.map((move) => [`${move.from_status}:${move.to_status}`, move]));
   const position = new Map(columns.map((column, index) => [column.status_id, index]));
-  const created = moves.some((move) => move.from_status === null);
   const deleted = moves.some((move) => move.to_status === null);
   const known = new Set(columns.map((c) => c.status_id));
   const others = [
@@ -2019,11 +2304,16 @@ function MoveMatrix(props: TabProps) {
     ),
   ];
   const statuses = [...columns.map((c) => c.status_id), ...others];
-  const sources: (number | null)[] = [...(created ? [null] : []), ...statuses];
+  const sources: (number | null)[] = [null, ...statuses];
   const targets: (number | null)[] = [...statuses, ...(deleted ? [null] : [])];
+  const emptyTargets = new Set(
+    targets.filter((target) => !moves.some((move) => move.to_status === target)),
+  );
   const from = (source: number | null) => moves.filter((move) => move.from_status === source);
   const into = (target: number | null) => moves.filter((move) => move.to_status === target);
   const sum = (list: MoveCount[]) => list.reduce((total, move) => total + move.count, 0);
+  const shown = (list: MoveCount[]) =>
+    measure === "moves" ? sum(list) : eventRows(list, true).length;
   const isBack = (source: number | null, target: number | null) =>
     source !== null &&
     target !== null &&
@@ -2038,18 +2328,23 @@ function MoveMatrix(props: TabProps) {
           className="matrix-panel"
           style={visible ? { width: `calc(${visible}px - 2.2rem)` } : undefined}
         >
-          <MoveEvents {...props} moves={list} side={side} />
+          <MoveEvents {...props} moves={list} side={side} uniqueCards={measure === "cards"} />
         </div>
       </td>
     </tr>
   );
 
-  const splitRow = (list: MoveCount[], by: "target" | "source" = "target") => {
-    const total = sum(list);
+  const splitRow = (
+    list: MoveCount[],
+    by: "target" | "source" = "target",
+    showCreators = false,
+  ) => {
+    const rows = eventRows(list, measure === "cards");
+    const total = rows.length;
     const byStatus = new Map<string, number>();
-    for (const move of list) {
+    for (const { move } of rows) {
       const key = String(by === "target" ? move.to_status : move.from_status);
-      byStatus.set(key, (byStatus.get(key) ?? 0) + move.count);
+      byStatus.set(key, (byStatus.get(key) ?? 0) + 1);
     }
     const slices: Slice[] = (by === "target" ? targets : sources).flatMap((status) => {
       const value = byStatus.get(String(status));
@@ -2069,11 +2364,61 @@ function MoveMatrix(props: TabProps) {
     return (
       <tr className="history-row donut-row">
         <td colSpan={span}>
-          <DonutSplit slices={slices} total={total} caption="moves" />
+          {showCreators ? (
+            <div className="matrix-splits">
+              <div>
+                <h4>By status</h4>
+                <DonutSplit slices={slices} total={total} caption={measure} />
+              </div>
+              <div>
+                <h4>By creator</h4>
+                {creatorSplit(list)}
+              </div>
+            </div>
+          ) : (
+            <DonutSplit slices={slices} total={total} caption={measure} />
+          )}
         </td>
       </tr>
     );
   };
+
+  const creatorSplit = (list: MoveCount[]) => {
+    const createdCards = eventRows(list, true);
+    const creators = new Map<number | null, number>();
+    for (const { event } of createdCards) {
+      creators.set(event.user_id, (creators.get(event.user_id) ?? 0) + 1);
+    }
+    const colors = [
+      "#006b8f",
+      "#a74b3f",
+      "#6861a6",
+      "#3d8054",
+      "#a05d1d",
+      "#9b4779",
+      "#467780",
+      "#706b31",
+    ];
+    const slices: Slice[] = [...creators.entries()]
+      .sort((a, b) => b[1] - a[1] || (a[0] ?? -1) - (b[0] ?? -1))
+      .map(([id, count], index) => ({
+        key: String(id),
+        label: null,
+        name: personName(flow, id, "Unknown"),
+        color: id === null ? NEUTRAL : colors[index % colors.length] ?? NEUTRAL,
+        count,
+      }));
+    return <DonutSplit slices={slices} total={createdCards.length} caption="cards" />;
+  };
+
+  const creatorRow = (list: MoveCount[]) => (
+    <tr className="history-row donut-row">
+      <td colSpan={span}>
+        <h4>By creator</h4>
+        {creatorSplit(list)}
+      </td>
+    </tr>
+  );
 
   return (
     <div className="matrix-scroll" ref={scroller}>
@@ -2082,13 +2427,18 @@ function MoveMatrix(props: TabProps) {
           <tr>
             <th className="matrix-corner">From \ To</th>
             {targets.map((target) => (
-              <th key={String(target)} className="num">
-                <ColumnLabel
-                  flow={flow}
-                  id={target}
-                  empty={DELETED}
-                  to={target === null ? undefined : columnPath(slug, itemType, target)}
-                />
+              <th
+                key={String(target)}
+                className={`num matrix-target${emptyTargets.has(target) ? " no-moves" : ""}`}
+              >
+                <span className="matrix-head-label vertical-status-label">
+                  <ColumnLabel
+                    flow={flow}
+                    id={target}
+                    empty={DELETED}
+                    to={target === null ? undefined : columnPath(slug, itemType, target)}
+                  />
+                </span>
               </th>
             ))}
             <th className="num">Total</th>
@@ -2104,11 +2454,15 @@ function MoveMatrix(props: TabProps) {
             return (
               <Fragment key={String(source)}>
                 <tr
-                  className={`clickable${rowOpen ? " selected" : ""}`}
+                  className={`${total > 0 ? "clickable" : ""}${rowOpen ? " selected" : ""}`}
                   onClick={() => total > 0 && toggle({ kind: "out", source })}
-                  title={`Click for the split of where cards went from ${
-                    source === null ? CREATED : name(source)
-                  }`}
+                  title={
+                    total > 0
+                      ? `Click for the split of where cards went from ${
+                          source === null ? CREATED : name(source)
+                        }`
+                      : undefined
+                  }
                 >
                   <th scope="row">
                     {source === null ? (
@@ -2128,29 +2482,31 @@ function MoveMatrix(props: TabProps) {
                     return (
                       <td
                         key={String(target)}
-                        className={`num${move && isBack(source, target) ? " back-cell" : ""}${
-                          move ? " matrix-cell" : ""
-                        }${isOpen ? " open" : ""}`}
+                        className={`num${emptyTargets.has(target) ? " no-moves" : ""}${
+                          move && isBack(source, target) ? " back-cell" : ""
+                        }${move ? " matrix-cell" : ""}${isOpen ? " open" : ""}`}
                         title={
                           move
                             ? `${pairName(flow, source, target)}: ${plural(
-                                move.count,
-                                "move",
-                                "moves",
-                              )}, ${plural(move.cards, "card", "cards")}. Click to see them.`
+                                move.cards,
+                                "card",
+                                "cards",
+                              )}, ${plural(move.count, "move", "moves")}. Click to see them.`
                             : undefined
                         }
                         onClick={(event) => {
+                          event.stopPropagation();
                           if (move) {
-                            event.stopPropagation();
                             toggle({ kind: "cell", source, target });
                           }
                         }}
                       >
                         {move ? (
-                          <span className="matrix-number">{formatNumber(move.count)}</span>
+                          <span className="matrix-number">
+                            {formatNumber(measure === "moves" ? move.count : move.cards)}
+                          </span>
                         ) : (
-                          <span className="matrix-empty">·</span>
+                          <span className="matrix-empty">{source === target ? "-" : "0"}</span>
                         )}
                       </td>
                     );
@@ -2160,11 +2516,27 @@ function MoveMatrix(props: TabProps) {
                       rowOpen ? " open" : ""
                     }`}
                   >
-                    {total > 0 ? <span className="matrix-number">{formatNumber(total)}</span> : ""}
+                    {total > 0 ? (
+                      <button
+                        type="button"
+                        className="count-open"
+                        aria-expanded={rowOpen}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          toggle({ kind: "out", source });
+                        }}
+                      >
+                        <span className="matrix-number">{formatNumber(shown(outgoing))}</span>
+                      </button>
+                    ) : (
+                      "0"
+                    )}
                   </td>
                 </tr>
+                {source === null && cellMove && creatorRow([cellMove])}
                 {cellMove && listRow([cellMove], null)}
-                {rowOpen && splitRow(outgoing)}
+                {rowOpen && splitRow(outgoing, "target", source === null)}
+                {rowOpen && listRow(outgoing, "out", true)}
               </Fragment>
             );
           })}
@@ -2178,26 +2550,54 @@ function MoveMatrix(props: TabProps) {
               return (
                 <td
                   key={String(target)}
-                  className={`num matrix-total${total > 0 ? " matrix-cell" : ""}${
+                  className={`num matrix-total${total > 0 ? " matrix-cell" : " no-moves"}${
                     isOpen ? " open" : ""
                   }`}
                   title={
                     total > 0
-                      ? `Click to see every move into ${target === null ? DELETED : name(target)}`
+                      ? `Click to see every ${measure === "cards" ? "card" : "move"} into ${
+                          target === null ? DELETED : name(target)
+                        }`
                       : undefined
                   }
-                  onClick={() => total > 0 && toggle({ kind: "in", target })}
                 >
-                  {total > 0 ? <span className="matrix-number">{formatNumber(total)}</span> : ""}
+                  {total > 0 ? (
+                    <button
+                      type="button"
+                      className="count-open"
+                      aria-expanded={isOpen}
+                      onClick={() => toggle({ kind: "in", target })}
+                    >
+                      <span className="matrix-number">{formatNumber(shown(into(target)))}</span>
+                    </button>
+                  ) : (
+                    "0"
+                  )}
                 </td>
               );
             })}
             <td
-              className={`num matrix-total matrix-cell${open?.kind === "all" ? " open" : ""}`}
-              title="Click to see every move"
-              onClick={() => toggle({ kind: "all" })}
+              className={`num matrix-total${moves.length > 0 ? " matrix-cell" : ""}${
+                open?.kind === "all" ? " open" : ""
+              }`}
+              title={
+                moves.length > 0
+                  ? `Click to see every ${measure === "cards" ? "card" : "move"}`
+                  : undefined
+              }
             >
-              <span className="matrix-number">{formatNumber(sum(moves))}</span>
+              {moves.length > 0 ? (
+                <button
+                  type="button"
+                  className="count-open"
+                  aria-expanded={open?.kind === "all"}
+                  onClick={() => toggle({ kind: "all" })}
+                >
+                  <span className="matrix-number">{formatNumber(shown(moves))}</span>
+                </button>
+              ) : (
+                <span className="matrix-number">0</span>
+              )}
             </td>
           </tr>
           {open?.kind === "in" && splitRow(into(open.target), "source")}
@@ -2256,30 +2656,37 @@ export function StatusMoves({ column, ...props }: TabProps & { column: number })
 
 export function MovesTab(props: TabProps) {
   const { report } = props.flow;
-  if (report.moves.length === 0) {
-    return (
-      <div className="flow-metrics">
-        <MetricCard title="Moves" subtitle="Status changes in the period">
-          <Empty>No card changed status in this period.</Empty>
-        </MetricCard>
-      </div>
-    );
-  }
+  const [measure, setMeasure] = useState<MoveMeasure>(() =>
+    readStored("moves-measure") === "moves" ? "moves" : "cards",
+  );
   return (
     <div className="flow-metrics">
       <MetricCard
         title="Status to status"
+        actions={
+          <Segmented
+            label="Count"
+            options={MOVE_MEASURES}
+            value={measure}
+            onChange={(next) => {
+              writeStored("moves-measure", next);
+              setMeasure(next);
+            }}
+          />
+        }
         subtitle={
           <>
-            How many times cards went from each status (rows) to each other one (columns).{" "}
-            <span className="back-sample">Red</span> numbers are moves back to an earlier status in
-            Taiga's order. Click a number for the cards behind it, a row or its total for the split
-            of where cards went from that status, a column total for the cards that came in, and
-            the grand total for every move.
+            How many cards (or moves: a card can go the same way more than once) went from each
+            status (rows) to each other one (columns). <span className="back-sample">Red</span>{" "}
+            numbers are moves back to an earlier status in Taiga's order. Click a number for the
+            cards behind it, a row or its total for the split of where cards went from that status,
+            a column total for the cards that came in, and the grand total for every{" "}
+            {measure === "cards" ? "card" : "move"}.
           </>
         }
       >
-        <MoveMatrix {...props} />
+        {report.moves.length === 0 && <Empty>No card changed status in this period.</Empty>}
+        <MoveMatrix {...props} measure={measure} />
       </MetricCard>
     </div>
   );

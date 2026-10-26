@@ -11,6 +11,7 @@ import { CardTitle } from "../components/CardTitle";
 import { PersonLink, PersonList } from "../components/PersonLink";
 import { StayBadge } from "../components/StayBadge";
 import { StatusName } from "../components/StatusName";
+import { SortTitle, sortRows, useSort } from "../components/SortTitle";
 import { formatDuration } from "../charts/format";
 import { formatDateTime } from "../format";
 import { Empty, MetricCard } from "./FlowMetrics";
@@ -113,6 +114,7 @@ export function TransitionsTable({
   taigaUrl: string | null;
   withCard?: boolean;
 }) {
+  const [sort, onSort] = useSort();
   return (
     <div className="log-scroll">
       <table className={`table log-table${withCard ? "" : " log-table-card"}`}>
@@ -128,25 +130,55 @@ export function TransitionsTable({
         </colgroup>
         <thead>
           <tr>
-            <th>When</th>
-            {withCard && <th>Card</th>}
-            <th>Status change</th>
+            <th>
+              <SortTitle label="When" sortKey="when" sort={sort} onSort={onSort} />
+            </th>
+            {withCard && (
+              <th>
+                <SortTitle label="Card" sortKey="card" sort={sort} onSort={onSort} />
+              </th>
+            )}
+            <th>
+              <SortTitle label="Status change" sortKey="change" sort={sort} onSort={onSort} />
+            </th>
             <th className="num" title="How long the card had been in the status it left">
-              In previous status
+              <SortTitle label="In previous status" sortKey="time" sort={sort} onSort={onSort} />
             </th>
             <th
               className="num"
               title="Median of past stays in the status it left, and the range 70% of them fell in"
             >
-              Median
+              <SortTitle label="Median" sortKey="median" sort={sort} onSort={onSort} />
             </th>
-            <th aria-label="Compared with past stays" />
-            <th>Assigned</th>
-            <th>Moved by</th>
+            <th>
+              <SortTitle label="Compared" sortKey="level" sort={sort} onSort={onSort} />
+            </th>
+            <th>
+              <SortTitle label="Assigned" sortKey="assigned" sort={sort} onSort={onSort} />
+            </th>
+            <th>
+              <SortTitle label="Moved by" sortKey="person" sort={sort} onSort={onSort} />
+            </th>
           </tr>
         </thead>
         <tbody>
-          {rows.map((row) => (
+          {sortRows(rows, sort, (row, key) =>
+            key === "when"
+              ? row.happened_at
+              : key === "card"
+                ? row.ref ?? row.item_id
+                : key === "change"
+                  ? moveText(row)
+                  : key === "time"
+                    ? row.days_in_status
+                    : key === "median"
+                      ? row.usual?.p50 ?? null
+                      : key === "level"
+                        ? row.level
+                        : key === "assigned"
+                          ? row.assignees.map((person) => person.name).join(", ")
+                          : row.user?.name ?? row.user_name,
+          ).map((row) => (
             <tr key={row.history_id}>
               <td className="nowrap">{formatDateTime(row.happened_at)}</td>
               {withCard && (
@@ -190,7 +222,7 @@ export function TransitionsTable({
               </td>
               <td className="truncate" title={row.user?.name ?? row.user_name}>
                 {row.user ? (
-                  <PersonLink name={row.user.name} username={row.user.username} />
+                  <PersonLink name={row.user.name} id={row.user.id} />
                 ) : (
                   row.user_name || "-"
                 )}

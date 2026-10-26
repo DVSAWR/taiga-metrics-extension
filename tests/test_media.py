@@ -57,9 +57,10 @@ def test_photos_need_a_session(anonymous: TestClient) -> None:
 def test_logos_follow_project_visibility(
     client: TestClient, member: TestClient, services: Services, tmp_path: Path
 ) -> None:
-    """Only viewers who see the project get its logo."""
+    """Only viewers who see the project get its logo; every member sees it."""
     logo = tmp_path / "logo.png"
     logo.write_bytes(b"logo")
     media_of(services).logos[2] = logo
     assert client.get("/api/avatars/projects/alpha").content == b"logo"
-    assert member.get("/api/avatars/projects/alpha").status_code == 404
+    assert member.get("/api/avatars/projects/alpha").content == b"logo"
+    assert client.get("/api/avatars/projects/beta").status_code == 404

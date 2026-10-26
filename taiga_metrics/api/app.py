@@ -19,6 +19,7 @@ from taiga_metrics.auth.access import (
     PermissionStore,
     TaigaViewerDirectory,
     ViewerDirectory,
+    superuser_names,
 )
 from taiga_metrics.auth.sessions import DatabaseSessionStore, SessionStore
 from taiga_metrics.auth.taiga_client import PasswordChecker, TaigaPasswordChecker
@@ -29,6 +30,7 @@ from taiga_metrics.health import DatabaseHealthChecker, HealthChecker
 from taiga_metrics.media import MediaSource, TaigaMedia
 from taiga_metrics.metrics.loader import FlowData, StoredFlowData
 from taiga_metrics.migrations import head_revision
+from taiga_metrics.people import PeopleSource, StoredPeople
 from taiga_metrics.project_settings import DatabaseProjectSettings, ProjectSettingsStore
 from taiga_metrics.projects import ProjectSource, TaigaProjectSource
 from taiga_metrics.settings import Settings
@@ -56,6 +58,7 @@ class Services:
     media: MediaSource
     team: TeamSource
     comments: CommentSource
+    people: PeopleSource
 
 
 def create_app(settings: Settings | None = None, services: Services | None = None) -> FastAPI:
@@ -83,13 +86,14 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
             project_data=StoredProjectData(metrics_engine),
             password_checker=TaigaPasswordChecker(settings.taiga_api_url),
             sessions=DatabaseSessionStore(metrics_engine, timedelta(days=settings.session_days)),
-            viewers=TaigaViewerDirectory(taiga_engine),
+            viewers=TaigaViewerDirectory(taiga_engine, superuser_names(settings.superusers)),
             permissions=DatabasePermissionStore(metrics_engine),
             project_settings=DatabaseProjectSettings(metrics_engine),
             flow_data=StoredFlowData(metrics_engine),
             media=TaigaMedia(taiga_engine, settings.media_dir),
             team=DatabaseTeamStats(taiga_engine, metrics_engine),
             comments=TaigaComments(taiga_engine),
+            people=StoredPeople(taiga_engine, metrics_engine),
         )
         try:
             yield

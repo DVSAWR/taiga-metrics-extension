@@ -1,10 +1,11 @@
 """Who may see what.
 
-Taiga superusers, project owners, and project admins see everything in a project and
-configure it. Other members see what those managers allowed their role, which is
-nothing until someone enables something. People who are not members do not see the project at all. Identity,
-ownership, and memberships are read live from Taiga's database on every request, so a
-change in Taiga applies immediately.
+Taiga superusers, the extension's own superusers named in its settings, project owners,
+and project admins see everything in a project and configure it. Every other member sees
+only the tabs those managers allowed their role, including their own person page.
+People who are not members do not see the project
+at all. Identity, ownership, and memberships are read live from Taiga's database on every
+request, so a change in Taiga applies immediately.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncEngine
 
-Page = Literal["flow", "search", "team"]
+Page = Literal["overview", "directions", "people", "my_page", "trends", "activity", "cards"]
 Scope = Literal["all", "own"]
 PAGES: Final[tuple[Page, ...]] = get_args(Page)
 SCOPES: Final[tuple[Scope, ...]] = get_args(Scope)
@@ -62,16 +63,20 @@ class RolePermission:
 
 @dataclass(frozen=True)
 class ProjectAccess:
-    """What a viewer may do in one project."""
+    """What a viewer may do in one project.
+
+    ``member`` is whether the viewer belongs to the project.
+    """
 
     pages: frozenset[Page]
     scope: Scope
     can_manage: bool
+    member: bool = True
 
     @property
     def visible(self) -> bool:
         """Whether the project shows up for the viewer at all."""
-        return self.can_manage or bool(self.pages)
+        return self.can_manage or self.member or bool(self.pages)
 
     def allows(self, *pages: Page) -> bool:
         """Whether at least one of ``pages`` is allowed."""
@@ -79,7 +84,7 @@ class ProjectAccess:
 
 
 FULL_ACCESS: Final = ProjectAccess(frozenset(PAGES), "all", can_manage=True)
-NO_ACCESS: Final = ProjectAccess(frozenset(), "all", can_manage=False)
+NO_ACCESS: Final = ProjectAccess(frozenset(), "all", can_manage=False, member=False)
 
 
 def project_access(
@@ -105,6 +110,11 @@ class ViewerDirectory(Protocol):
         ...
 
 
+def superuser_names(value: str) -> frozenset[str]:
+    """Usernames from a comma separated list, ignoring case and blanks."""
+    return frozenset(name.strip().lower() for name in value.split(",") if name.strip())
+
+
 USER = text(
     "select id, username, full_name, email, is_superuser from users_user "
     "where id = :user_id and is_active and not is_system"
@@ -116,11 +126,15 @@ MEMBERSHIPS = text(
 
 
 class TaigaViewerDirectory:
-    """Reads identity, ownership, and memberships live from Taiga's database."""
+    """Reads identity, ownership, and memberships live from Taiga's database.
 
-    def __init__(self, engine: AsyncEngine) -> None:
-        """Keep the read-only engine of Taiga's database."""
+    ``superusers`` are usernames the extension treats as superusers on top of Taiga's own.
+    """
+
+    def __init__(self, engine: AsyncEngine, superusers: frozenset[str] = frozenset()) -> None:
+        """Keep the read-only engine of Taiga's database and the extension's superusers."""
         self.engine = engine
+        self.superusers = superusers
 
     async def viewer(self, user_id: int) -> Viewer | None:
         """Active, non-system users only."""
@@ -138,7 +152,7 @@ class TaigaViewerDirectory:
             username=user.username,
             full_name=user.full_name or "",
             email=user.email or "",
-            is_superuser=user.is_superuser,
+            is_superuser=user.is_superuser or user.username.lower() in self.superusers,
             owned_projects=owned,
             roles=roles,
             admin_projects=admin,

@@ -105,11 +105,3 @@ def test_members_cannot_configure(client: TestClient, member: TestClient) -> Non
         ).status_code
         == 403
     )
-
-
-def test_removed_columns_are_hidden_until_shown(client: TestClient) -> None:
-    """The choice is kept per card type."""
-    assert client.get("/api/projects/alpha/columns").json()[0]["show_removed"] is False
-    url = "/api/projects/alpha/removed-columns/userstory"
-    assert client.put(url, json={"show_removed": True}, headers=HEADERS).status_code == 204
-    assert client.get("/api/projects/alpha/columns").json()[0]["show_removed"] is True

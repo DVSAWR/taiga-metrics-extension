@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import {
-  ALL_TIME,
   fetchFilterPanel,
+  fetchDirections,
+  fetchPeopleSummary,
+  type DirectionRef,
   type FilterCategoryKey,
   type FilterPanelData,
   type FilterSelection,
@@ -12,12 +14,19 @@ import {
 import {
   EMPTY_SELECTION,
   selectionSize,
+  refreshDefaultPeriod,
   useCustomFilters,
   type CustomFilter,
+  useDefaultPeriod,
 } from "../filterState";
 import { Icon } from "../icons";
+import { TYPE_LABELS } from "../modules";
+import { Toggle } from "./Toggle";
 import { UserPhoto } from "./UserPhoto";
-import { hasPeriod, PeriodFilter } from "./PeriodFilter";
+import { PeriodFilter, samePeriod } from "./PeriodFilter";
+import { ProjectPicker } from "./ProjectPicker";
+import { Dropdown, type DropdownOption } from "./Dropdown";
+import { navigate, peoplePath, personPath, rolePath } from "../router";
 
 type Mode = "include" | "exclude";
 
@@ -27,24 +36,112 @@ function valueKey(category: FilterCategoryKey, value: string): string {
   return `${category}:${value}`;
 }
 
-export function FilterButton({
-  open,
-  selection,
-  period,
-  onToggle,
-}: {
-  open: boolean;
-  selection: FilterSelection;
-  period?: Period;
-  onToggle: () => void;
-}) {
-  const count = selectionSize(selection) + (hasPeriod(period) ? 1 : 0);
+export interface TypeChoice {
+  types: ItemType[];
+  value: ItemType;
+  onChange: (type: ItemType) => void;
+}
+
+function TypePicker({ choice }: { choice: TypeChoice }) {
+  if (choice.types.length < 2) {
+    return null;
+  }
   return (
-    <button type="button" className={`btn-filter${open ? " active" : ""}`} onClick={onToggle}>
-      <Icon name="filters" />
-      <span>{open ? "Hide filters" : "Filters"}</span>
-      {count > 0 && <span className="selected-filters">{count}</span>}
-    </button>
+    <div className="type-picker" role="radiogroup" aria-label="Card type">
+      {choice.types.map((type) => (
+        <button
+          key={type}
+          type="button"
+          role="radio"
+          aria-checked={type === choice.value}
+          className={`type-pick${type === choice.value ? " active" : ""}`}
+          onClick={() => choice.onChange(type)}
+        >
+          {TYPE_LABELS[type]}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function RolePicker({ slug, roleId }: { slug: string; roleId: number | null }) {
+  const [roles, setRoles] = useState<DirectionRef[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    fetchDirections(slug)
+      .then((next) => {
+        if (!cancelled) setRoles(next);
+      })
+      .catch(() => {
+        if (!cancelled) setRoles([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [slug]);
+  return (
+    <div className="filter-role-picker">
+      <span className="filter-role-label">Role</span>
+      <Dropdown
+        label="Role"
+        value={roleId === null ? "all" : String(roleId)}
+        placeholder={roleId === null ? "All roles" : `Role ${roleId}`}
+        options={[
+          { value: "all", label: "All roles" },
+          ...roles.map((role) => ({ value: String(role.role_id), label: role.name })),
+        ]}
+        onChange={(value) => navigate(rolePath(slug, value === "all" ? null : Number(value)))}
+      />
+    </div>
+  );
+}
+
+function PersonPicker({
+  slug,
+  personId,
+  itemType,
+  period,
+}: {
+  slug: string;
+  personId: number | null;
+  itemType: ItemType;
+  period: Period;
+}) {
+  const [people, setPeople] = useState<{ user_id: number; name: string }[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    fetchPeopleSummary(slug, itemType, period)
+      .then((next) => {
+        if (!cancelled) setPeople(next);
+      })
+      .catch(() => {
+        if (!cancelled) setPeople([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [slug, itemType, period]);
+  return (
+    <div className="filter-person-picker">
+      <span className="filter-role-label">Person</span>
+      <Dropdown
+        label="Person"
+        value={personId === null ? "all" : String(personId)}
+        placeholder={personId === null ? "All people" : `Person #${personId}`}
+        options={[
+          { value: "all", label: "All people" },
+          ...[...people]
+            .sort((a, b) => a.name.localeCompare(b.name))
+            .map((person) => ({
+              value: String(person.user_id),
+              label: person.name,
+            })),
+        ]}
+        onChange={(value) =>
+          navigate(value === "all" ? peoplePath(slug) : personPath(slug, Number(value)))
+        }
+      />
+    </div>
   );
 }
 
@@ -199,6 +296,10 @@ export function FilterPanel({
   onChange,
   period,
   onPeriodChange,
+  compare,
+  typeChoice,
+  roleId,
+  personId,
 }: {
   slug: string;
   itemType: ItemType | null;
@@ -206,8 +307,13 @@ export function FilterPanel({
   onChange: (selection: FilterSelection) => void;
   period?: Period;
   onPeriodChange?: (period: Period) => void;
+  compare?: { checked: boolean; onChange: (checked: boolean) => void };
+  typeChoice?: TypeChoice;
+  roleId?: number | null;
+  personId?: number | null;
 }) {
   const [panel, setPanel] = useState<FilterPanelData | null>(null);
+  const defaults = useDefaultPeriod(slug);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>("include");
   const [openCategory, setOpenCategory] = useState<FilterCategoryKey | null>(null);
@@ -257,27 +363,67 @@ export function FilterPanel({
     });
   };
 
-  const canReset = selectionSize(selection) > 0 || hasPeriod(period) || mode !== "include";
+  const canReset =
+    selectionSize(selection) > 0 ||
+    Boolean(period && defaults && !samePeriod(period, defaults)) ||
+    (roleId !== undefined && roleId !== null) ||
+    (personId !== undefined && personId !== null) ||
+    mode !== "include";
   const reset = () => {
     onChange(EMPTY_SELECTION);
-    onPeriodChange?.(ALL_TIME);
+    if (period && onPeriodChange) {
+      void refreshDefaultPeriod(slug).then((current) =>
+        onPeriodChange({ ...current, days: period.days }),
+      );
+    }
     setMode("include");
     setOpenCategory(null);
+    if (roleId !== undefined && roleId !== null) {
+      navigate(rolePath(slug));
+    }
+    if (personId !== undefined && personId !== null) {
+      navigate(peoplePath(slug));
+    }
   };
 
   return (
     <aside className="filter-panel">
+      <ProjectPicker slug={slug} />
+      {typeChoice && <TypePicker choice={typeChoice} />}
+      {roleId !== undefined && <RolePicker slug={slug} roleId={roleId} />}
+      {personId !== undefined && itemType && period && (
+        <PersonPicker slug={slug} personId={personId} itemType={itemType} period={period} />
+      )}
       <div className="filter-reset-row">
         <button
           type="button"
           className="link-button filter-reset"
           disabled={!canReset}
-          title="Clear every filter and the period"
+          title="Clear every filter and go back to the current period"
           onClick={reset}
         >
           Reset all filters
         </button>
       </div>
+      {compare && (
+        <label
+          className={`check-line filter-compare${selectionSize(selection) > 0 ? "" : " disabled"}`}
+          title="Show what the filters leave out next to what they select. With people or roles: the time anyone else was assigned on the same cards; otherwise every other card."
+        >
+          <Toggle
+            checked={compare.checked && selectionSize(selection) > 0}
+            disabled={selectionSize(selection) === 0}
+            onChange={compare.onChange}
+            label="Compare with the rest"
+          />
+          <span>
+            Compare with the rest
+            {selectionSize(selection) === 0 && (
+              <span className="filter-compare-hint">pick a filter first</span>
+            )}
+          </span>
+        </label>
+      )}
       <CustomFilters slug={slug} selection={selection} onApply={onChange} />
       {period && onPeriodChange && (
         <PeriodFilter slug={slug} period={period} onChange={onPeriodChange} />
@@ -359,6 +505,81 @@ export function FilterPanel({
           </p>
         )}
       </div>
+    </aside>
+  );
+}
+
+export function PeriodPanel({
+  slug,
+  period,
+  onPeriodChange,
+  typeChoice,
+  roleId,
+  personId,
+  activityChoice,
+}: {
+  slug: string;
+  period: Period;
+  onPeriodChange: (period: Period) => void;
+  typeChoice?: TypeChoice;
+  roleId?: number | null;
+  personId?: number | null;
+  activityChoice?: {
+    value: string;
+    defaultValue: string;
+    options: DropdownOption[];
+    onChange: (value: string) => void;
+  };
+}) {
+  const defaults = useDefaultPeriod(slug);
+  return (
+    <aside className="filter-panel">
+      <ProjectPicker slug={slug} />
+      {typeChoice && <TypePicker choice={typeChoice} />}
+      {roleId !== undefined && <RolePicker slug={slug} roleId={roleId} />}
+      {personId !== undefined && typeChoice && (
+        <PersonPicker
+          slug={slug}
+          personId={personId}
+          itemType={typeChoice.value}
+          period={period}
+        />
+      )}
+      {activityChoice && (
+        <div className="filter-activity-picker">
+          <span className="filter-role-label">Whose activity</span>
+          <Dropdown
+            label="Whose activity"
+            value={activityChoice.value}
+            options={activityChoice.options}
+            onChange={activityChoice.onChange}
+          />
+        </div>
+      )}
+      <div className="filter-reset-row">
+        <button
+          type="button"
+          className="link-button filter-reset"
+          disabled={
+            samePeriod(period, defaults) &&
+            (roleId === null || roleId === undefined) &&
+            (personId === null || personId === undefined) &&
+            (!activityChoice || activityChoice.value === activityChoice.defaultValue)
+          }
+          title="Reset selection and go back to the current period"
+          onClick={() => {
+            void refreshDefaultPeriod(slug).then((current) =>
+              onPeriodChange({ ...current, days: period.days }),
+            );
+            if (roleId !== undefined && roleId !== null) navigate(rolePath(slug));
+            if (personId !== undefined && personId !== null) navigate(peoplePath(slug));
+            if (activityChoice) activityChoice.onChange(activityChoice.defaultValue);
+          }}
+        >
+          Reset all filters
+        </button>
+      </div>
+      <PeriodFilter slug={slug} period={period} onChange={onPeriodChange} />
     </aside>
   );
 }

@@ -104,3 +104,7 @@ export function formatAdaptive(days: number | null): string {
   const small = next ? Math.floor((minutes - big * size) / next[1]) : 0;
   return next && small > 0 ? `${big} ${name} ${small} ${next[0]}` : `${big} ${name}`;
 }
+
+export function fillWidth(percent: number): { width: string; minWidth?: number } {
+  return percent > 0 ? { width: `${percent}%` } : { width: "0%", minWidth: 0 };
+}

@@ -1,19 +1,33 @@
 import { createContext, Fragment, useContext } from "react";
 
+import { personPath } from "../router";
 import { TextLink } from "./TextLink";
 
 export const TaigaUrlContext = createContext<string | null>(null);
 
-export function PersonLink({ name, username }: { name: string; username: string | null }) {
-  const taigaUrl = useContext(TaigaUrlContext);
-  if (!taigaUrl || !username) {
+export interface PeopleAccess {
+  slug: string;
+  me: number;
+  others: boolean;
+}
+
+export const PeopleContext = createContext<PeopleAccess | null>(null);
+
+export function usePersonPath(id: number | null): string | null {
+  const access = useContext(PeopleContext);
+  if (!access || id === null || (id !== access.me && !access.others)) {
+    return null;
+  }
+  return personPath(access.slug, id);
+}
+
+export function PersonLink({ name, id }: { name: string; id: number | null }) {
+  const to = usePersonPath(id);
+  if (!to) {
     return <>{name}</>;
   }
   return (
-    <TextLink
-      href={`${taigaUrl}/profile/${encodeURIComponent(username)}`}
-      title={`${name} in Taiga`}
-    >
+    <TextLink to={to} title={`${name}: their page`}>
       {name}
     </TextLink>
   );
@@ -36,12 +50,7 @@ export function PersonRef({
   if (id === null) {
     return <span className="muted-inline">{nobody}</span>;
   }
-  return (
-    <PersonLink
-      name={directory.people[String(id)] ?? `#${id}`}
-      username={directory.usernames[String(id)] ?? null}
-    />
-  );
+  return <PersonLink name={directory.people[String(id)] ?? `#${id}`} id={id} />;
 }
 
 export function PeopleRefs({
@@ -83,7 +92,7 @@ export function PersonList({
       {people.map((person, index) => (
         <Fragment key={person.id}>
           {index > 0 && ", "}
-          <PersonLink name={person.name} username={person.username} />
+          <PersonLink name={person.name} id={person.id} />
         </Fragment>
       ))}
     </>

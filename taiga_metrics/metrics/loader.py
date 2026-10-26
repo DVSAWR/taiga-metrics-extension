@@ -10,7 +10,9 @@ from typing import TYPE_CHECKING, Any, Protocol
 from pydantic import BaseModel
 from sqlalchemy import text
 
+from taiga_metrics.directions import DirectionRef, direction_flow
 from taiga_metrics.explore import Person
+from taiga_metrics.filters import AssignmentFilter
 from taiga_metrics.metrics.calendar import WorkCalendar
 from taiga_metrics.metrics.engine import (
     IN_PROGRESS_TYPES,
@@ -24,7 +26,6 @@ from taiga_metrics.metrics.engine import (
     StayLevel,
     Step,
     card_report,
-    card_without_columns,
     compute_flow,
     finish_samples,
     finish_time,
@@ -32,8 +33,8 @@ from taiga_metrics.metrics.engine import (
     first_work,
     intervals_of,
     stays_of,
+    usual_stays,
     with_levels,
-    without_columns,
 )
 from taiga_metrics.metrics.periods import (
     OUTSIDE,
@@ -44,7 +45,13 @@ from taiga_metrics.metrics.periods import (
     spans_for,
     stats_of,
 )
-from taiga_metrics.project_settings import DEFAULT_TIMEZONE, DEFAULT_WORKING_DAYS
+from taiga_metrics.metrics.returns import ReturnRules
+from taiga_metrics.metrics.share import PersonShare, person_quality, person_share
+from taiga_metrics.project_settings import (
+    DEFAULT_TIMEZONE,
+    DEFAULT_WORKING_DAYS,
+    ReturnSettings,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping, Sequence
@@ -52,8 +59,8 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+    from taiga_metrics.directions import DirectionFlow
     from taiga_metrics.explore import Sprint
-    from taiga_metrics.filters import AssignmentFilter
     from taiga_metrics.metrics.periods import PeriodKind
     from taiga_metrics.project_settings import ColumnType
 
@@ -64,16 +71,36 @@ class FlowResponse(BaseModel):
     """The flow report with display names and usernames of the people it mentions.
 
     Durations follow the project and member calendars: only working days count.
+    ``column_roles`` are the roles responsible for each column, ``roles`` their names.
     """
 
     report: FlowReport
     people: dict[int, str]
     usernames: dict[int, str] = {}
+    column_roles: dict[int, list[int]] = {}
+    roles: dict[int, str] = {}
     period_start: datetime | None
     period_end: datetime | None = None
     generated_at: datetime
     timezone: str
     working_weekdays: list[int] = []
+
+
+class PersonSummary(BaseModel):
+    """One person's key numbers over a period: the time they were assigned."""
+
+    user_id: int
+    name: str
+    username: str | None
+    role_id: int | None
+    in_progress: int
+    stuck: int
+    finished: int
+    lead_p50: float | None
+    cycle_p50: float | None
+    passes: int
+    clean_passes: int
+    returns: int
 
 
 class Period(BaseModel):
@@ -356,6 +383,64 @@ class FlowData(Protocol):
         """The flow of one card, or ``None`` if the project has no such card."""
         ...
 
+    async def person_share(
+        self,
+        project_id: int,
+        item_type: str,
+        user_id: int,
+        *,
+        period: Period,
+        item_ids: Collection[int] | None = None,
+        every: bool = False,
+    ) -> PersonShare:
+        """The person's part of the time in every column of the card type."""
+        ...
+
+    async def directions(self, project_id: int) -> list[DirectionRef]:
+        """Roles answering for at least one column, in Taiga's role order."""
+        ...
+
+    async def direction(
+        self,
+        project_id: int,
+        item_type: str,
+        *,
+        statuses: Collection[int],
+        members: Collection[int],
+        period: Period,
+        item_ids: Collection[int] | None = None,
+    ) -> DirectionFlow:
+        """The direction's columns of one card type over the period."""
+        ...
+
+    async def directions_flow(
+        self,
+        project_id: int,
+        item_type: str,
+        groups: Sequence[tuple[Collection[int], Collection[int]]],
+        *,
+        period: Period,
+        item_ids: Collection[int] | None = None,
+    ) -> list[DirectionFlow]:
+        """Several directions at once, given as their columns and members."""
+        ...
+
+    async def people_summary(
+        self,
+        project_id: int,
+        item_type: str,
+        users: Collection[int],
+        *,
+        period: Period,
+        item_ids: Collection[int] | None = None,
+    ) -> list[PersonSummary]:
+        """The key numbers of each person, the time they were assigned, alphabetically."""
+        ...
+
+    async def member_ids(self, project_id: int) -> list[int]:
+        """The project's members, integration bots left out."""
+        ...
+
     async def period_status_times(
         self,
         project_id: int,
@@ -476,6 +561,51 @@ ASSIGNMENTS = text(
 
 MEMBER_ROLES = text("select user_id, role_id from taiga_membership where project_id = :project_id")
 
+MEMBER_IDS = text(
+    "select m.user_id from taiga_membership m join taiga_user u on u.id = m.user_id "
+    "where m.project_id = :project_id and not coalesce(u.is_system, false) order by m.user_id"
+)
+
+COLUMN_ROLES = text(
+    "select status_id, role_id from column_role "
+    "where project_id = :project_id and item_type = :item_type order by status_id, role_id"
+)
+
+SYSTEM_USERS = text("select id from taiga_user where is_system and id = any(:ids)")
+
+RETURN_RULES = text(
+    "select earlier, out_of_done, misclick_minutes, credit from return_rules "
+    "where project_id = :project_id and item_type = :item_type"
+)
+
+RETURN_PAIRS = text(
+    "select from_status, to_status, is_return from return_pair "
+    "where project_id = :project_id and item_type = :item_type"
+)
+
+COLUMN_MODES = text(
+    "select status_id, mode from column_return "
+    "where project_id = :project_id and item_type = :item_type"
+)
+
+WIP_LIMITS = text(
+    "select id, wip_limit from taiga_status "
+    "where project_id = :project_id and item_type = :item_type"
+)
+
+DIRECTIONS = text(
+    """
+    select r.id as role_id, r.name, cr.item_type, cr.status_id,
+           array(select m.user_id from taiga_membership m
+                  where m.project_id = r.project_id and m.role_id = r.id
+                  order by m.user_id) as members
+      from column_role cr
+      join taiga_role r on r.id = cr.role_id and r.project_id = cr.project_id
+     where cr.project_id = :project_id
+     order by r.position, r.id, cr.item_type, cr.status_id
+    """
+)
+
 TRANSITIONS = text(
     """
     select t.history_id, t.item_type, t.item_id, w.ref, coalesce(w.subject, '') as subject,
@@ -526,11 +656,6 @@ LAST_ACTIVITY = text(
          where project_id = :project_id and item_type = :item_type
     ) events group by item_id
     """
-)
-
-SHOW_REMOVED = text(
-    "select show_removed from item_type_display "
-    "where project_id = :project_id and item_type = :item_type"
 )
 
 PROJECT_CALENDAR = text(
@@ -599,7 +724,7 @@ def total_cells(
     work: dict[str, float] = defaultdict(float)
     cards: dict[str, int] = defaultdict(int)
     for card in scan.cards:
-        finished = finish_time(card, types)
+        finished = finish_time(card, types, as_of=period.until)
         if (
             finished is None
             or (period.since is not None and finished < period.since)
@@ -645,7 +770,7 @@ def finished_rows(
     """The cards that finished in the period ``key``, longest lead time first."""
     rows = []
     for card in scan.cards:
-        finished = finish_time(card, types)
+        finished = finish_time(card, types, as_of=period.until)
         if (
             finished is None
             or (period.since is not None and finished < period.since)
@@ -800,10 +925,13 @@ class StoredFlowData:
                 }
             )
             found = await self.people(connection, mentioned)
+            column_roles, roles = await self.column_roles(connection, project_id, item_type)
         return FlowResponse(
             report=report,
             people={user: person.name for user, person in found.items()},
             usernames={user: person.username for user, person in found.items() if person.username},
+            column_roles=column_roles,
+            roles=roles,
             period_start=period.since,
             period_end=period.until,
             generated_at=now,
@@ -824,14 +952,26 @@ class StoredFlowData:
         column: int | None = None,
         loaded: tuple[list[Column], list[Card]] | None = None,
     ) -> tuple[FlowReport, Calendars]:
-        """The flow report of one card type, removed columns left out unless shown.
+        """The flow report of one card type.
 
-        ``loaded`` are the columns and cards when the caller already has them.
+        ``loaded`` are the columns and cards when the caller already has them. What is
+        stuck now is judged against every card's whole history, whatever the filters.
         """
         params = {"project_id": project_id, "item_type": item_type}
         columns, cards = loaded or await self.cards(connection, params, item_ids)
         calendars = await self.calendars(connection, project_id)
         roles_of = await self.member_roles(connection, project_id) if people else {}
+        rules, misclick = await self.return_options(connection, project_id, item_type)
+        everything = (
+            cards
+            if loaded is None and item_ids is None
+            else (await self.cards(connection, params))[1]
+        )
+        usual = usual_stays(
+            everything,
+            calendars,
+            FlowOptions(now=now, since=None, working_days=period.working, misclick=misclick),
+        )
         report = compute_flow(
             cards,
             columns,
@@ -844,10 +984,12 @@ class StoredFlowData:
                 people=people,
                 roles_of=roles_of,
                 column=column,
+                usual=usual,
+                returns=rules,
+                misclick=misclick,
             ),
         )
-        hidden = await self.hidden_columns(connection, columns, params)
-        return without_columns(report, hidden), calendars
+        return report, calendars
 
     @staticmethod
     async def cards(
@@ -926,8 +1068,9 @@ class StoredFlowData:
                 rows = [
                     row
                     for row in rows
-                    if people.matches(frozenset(row["before_ids"]), roles_of)
-                    or people.matches(frozenset(row["after_ids"]), roles_of)
+                    if people.takes_event(
+                        frozenset(row["before_ids"]), frozenset(row["after_ids"]), roles_of
+                    )
                 ][offset : offset + limit + 1]
             rows = rows[: limit + 1]
             stays, usual = (
@@ -970,7 +1113,10 @@ class StoredFlowData:
             connection, project_id, item_type, now=now, period=period, people=people, loaded=loaded
         )
         cards = loaded[1]
-        options = FlowOptions(now=now, since=None, working_days=period.working)
+        rules, misclick = await self.return_options(connection, project_id, item_type)
+        options = FlowOptions(
+            now=now, since=None, working_days=period.working, misclick=misclick, returns=rules
+        )
         stays = {
             (card.item_id, stay.end): stay
             for card in cards
@@ -1036,16 +1182,15 @@ class StoredFlowData:
                 assignees=current_assignees(assignments),
                 assignments=assignments,
             )
-            hidden = await self.hidden_columns(connection, columns, params)
             now = datetime.now(UTC)
-            report = card_without_columns(
-                card_report(
-                    card,
-                    columns,
-                    calendars,
-                    FlowOptions(now=now, since=None, working_days=working),
+            rules, misclick = await self.return_options(connection, project_id, item_type)
+            report = card_report(
+                card,
+                columns,
+                calendars,
+                FlowOptions(
+                    now=now, since=None, working_days=working, misclick=misclick, returns=rules
                 ),
-                hidden,
             )
             usual, _ = await self.report(
                 connection, project_id, item_type, now=now, period=Period(working=working)
@@ -1073,8 +1218,7 @@ class StoredFlowData:
                     is_deleted=column.is_deleted,
                 )
                 for column in sorted(columns, key=lambda c: (c.is_deleted, c.position))
-                if column.status_id not in hidden
-                and (not column.is_deleted or column.status_id in used)
+                if not column.is_deleted or column.status_id in used
             ],
             people={user: person.name for user, person in found.items()},
             usernames={user: person.username for user, person in found.items() if person.username},
@@ -1094,22 +1238,16 @@ class StoredFlowData:
         """Each finished stay with the period it ended in, the open stays, and the spans.
 
         Stays shorter than ``pass_minutes`` only passed through and are left out, as are
-        stays that ended outside ``period`` and those in columns hidden for the type.
+        stays that ended outside ``period``.
         """
         params = {"project_id": project_id, "item_type": item_type}
         async with self.engine.connect() as connection:
             columns, cards = await self.cards(connection, params, item_ids)
             calendars = await self.calendars(connection, project_id)
-            hidden = await self.hidden_columns(connection, columns, params)
         now = datetime.now(UTC)
         options = FlowOptions(now=now, since=None, working_days=period.working)
         least = timedelta(minutes=pass_minutes)
-        stays = [
-            (card, stay)
-            for card in cards
-            for stay in stays_of(card, calendars, options)
-            if stay.status_id not in hidden
-        ]
+        stays = [(card, stay) for card in cards for stay in stays_of(card, calendars, options)]
         ended = [
             (card, stay)
             for card, stay in stays
@@ -1132,7 +1270,7 @@ class StoredFlowData:
             span = span_of(stay.end, spans) if stay.end else None
             placed.append((card, stay, span.key if span else OUTSIDE))
         return PeriodScan(
-            columns=[column for column in columns if column.status_id not in hidden],
+            columns=columns,
             spans=spans,
             placed=placed,
             open_stays=[(card, stay) for card, stay in stays if stay.end is None],
@@ -1310,12 +1448,258 @@ class StoredFlowData:
         )
 
     @staticmethod
-    async def hidden_columns(
-        connection: AsyncConnection, columns: Sequence[Column], params: Mapping[str, Any]
-    ) -> set[int]:
-        """Columns removed from Taiga, unless the card type is set to show them."""
-        shown = (await connection.execute(SHOW_REMOVED, params)).scalar()
-        return set() if shown else {column.status_id for column in columns if column.is_deleted}
+    async def return_options(
+        connection: AsyncConnection, project_id: int, item_type: str
+    ) -> tuple[ReturnRules, timedelta]:
+        """The card type's return rules and its misclick threshold, defaults filled in."""
+        params = {"project_id": project_id, "item_type": item_type}
+        row = (await connection.execute(RETURN_RULES, params)).first()
+        modes = {row.status_id: row.mode for row in await connection.execute(COLUMN_MODES, params)}
+        pairs = list(await connection.execute(RETURN_PAIRS, params))
+        settings = (
+            ReturnSettings.model_validate(row._mapping) if row is not None else ReturnSettings()
+        )
+        rules = ReturnRules(
+            earlier=settings.earlier,
+            out_of_done=settings.out_of_done,
+            credit=settings.credit,
+            pauses=frozenset(status for status, mode in modes.items() if mode == "pause"),
+            triage=frozenset(status for status, mode in modes.items() if mode == "triage"),
+            marked=frozenset((row.from_status, row.to_status) for row in pairs if row.is_return),
+            unmarked=frozenset(
+                (row.from_status, row.to_status) for row in pairs if not row.is_return
+            ),
+        )
+        return rules, timedelta(minutes=settings.misclick_minutes)
+
+    @staticmethod
+    async def column_roles(
+        connection: AsyncConnection, project_id: int, item_type: str
+    ) -> tuple[dict[int, list[int]], dict[int, str]]:
+        """The roles responsible for each column of the card type, and their names."""
+        params = {"project_id": project_id, "item_type": item_type}
+        by_column: dict[int, list[int]] = defaultdict(list)
+        for row in await connection.execute(COLUMN_ROLES, params):
+            by_column[row.status_id].append(row.role_id)
+        used = {role for roles in by_column.values() for role in roles}
+        names = {
+            row.id: row.name
+            for row in await connection.execute(ROLE_NAMES, params)
+            if row.id in used
+        }
+        return dict(by_column), names
+
+    async def directions(self, project_id: int) -> list[DirectionRef]:
+        """Roles answering for at least one column, in Taiga's role order."""
+        found: dict[int, DirectionRef] = {}
+        async with self.engine.connect() as connection:
+            for row in await connection.execute(DIRECTIONS, {"project_id": project_id}):
+                ref = found.setdefault(
+                    row.role_id,
+                    DirectionRef(
+                        role_id=row.role_id, name=row.name, columns={}, members=list(row.members)
+                    ),
+                )
+                ref.columns.setdefault(row.item_type, []).append(row.status_id)
+        return list(found.values())
+
+    async def direction(
+        self,
+        project_id: int,
+        item_type: str,
+        *,
+        statuses: Collection[int],
+        members: Collection[int],
+        period: Period,
+        item_ids: Collection[int] | None = None,
+    ) -> DirectionFlow:
+        """The direction's columns of one card type over the period, every card measured.
+
+        Integration bots, Taiga's system users, are left out of the people.
+        """
+        found = await self.directions_flow(
+            project_id, item_type, [(statuses, members)], period=period, item_ids=item_ids
+        )
+        return found[0]
+
+    async def directions_flow(
+        self,
+        project_id: int,
+        item_type: str,
+        groups: Sequence[tuple[Collection[int], Collection[int]]],
+        *,
+        period: Period,
+        item_ids: Collection[int] | None = None,
+    ) -> list[DirectionFlow]:
+        """Several directions at once, given as their columns and members, one report shared.
+
+        Integration bots, Taiga's system users, are left out of the people.
+        """
+        params = {"project_id": project_id, "item_type": item_type}
+        now = datetime.now(UTC)
+        async with self.engine.connect() as connection:
+            loaded = await self.cards(connection, params, item_ids)
+            report, calendars = await self.report(
+                connection,
+                project_id,
+                item_type,
+                now=now,
+                period=period,
+                item_ids=item_ids,
+                loaded=loaded,
+            )
+            wip = {row.id: row.wip_limit for row in await connection.execute(WIP_LIMITS, params)}
+            rules, misclick = await self.return_options(connection, project_id, item_type)
+            options = FlowOptions(
+                now=now,
+                since=period.since,
+                until=period.until,
+                working_days=period.working,
+                misclick=misclick,
+                returns=rules,
+            )
+            flows = [
+                direction_flow(
+                    report,
+                    loaded[1],
+                    calendars,
+                    options,
+                    columns=loaded[0],
+                    statuses=statuses,
+                    members=members,
+                    wip_limits=wip,
+                )
+                for statuses, members in groups
+            ]
+            mentioned = {person.user_id for flow in flows for person in flow.people} | {
+                user for flow in flows for card in flow.stuck for user in card.assignees
+            }
+            bots = {
+                row.id
+                for row in await connection.execute(SYSTEM_USERS, {"ids": sorted(mentioned)})
+            }
+            found = await self.people(connection, mentioned - bots)
+        names = {user: person.name for user, person in found.items()}
+        usernames = {user: person.username for user, person in found.items() if person.username}
+        return [
+            flow.model_copy(
+                update={
+                    "people": [person for person in flow.people if person.user_id not in bots],
+                    "names": names,
+                    "usernames": usernames,
+                }
+            )
+            for flow in flows
+        ]
+
+    async def member_ids(self, project_id: int) -> list[int]:
+        """The project's members, integration bots left out."""
+        async with self.engine.connect() as connection:
+            return [
+                row.user_id
+                for row in await connection.execute(MEMBER_IDS, {"project_id": project_id})
+            ]
+
+    async def people_summary(
+        self,
+        project_id: int,
+        item_type: str,
+        users: Collection[int],
+        *,
+        period: Period,
+        item_ids: Collection[int] | None = None,
+    ) -> list[PersonSummary]:
+        """The key numbers of each person, the time they were assigned, alphabetically.
+
+        Every person's report is computed over the same loaded cards.
+        """
+        params = {"project_id": project_id, "item_type": item_type}
+        now = datetime.now(UTC)
+        async with self.engine.connect() as connection:
+            columns, cards = await self.cards(connection, params, item_ids)
+            calendars = await self.calendars(connection, project_id)
+            roles_of = await self.member_roles(connection, project_id)
+            rules, misclick = await self.return_options(connection, project_id, item_type)
+            usual = usual_stays(
+                cards,
+                calendars,
+                FlowOptions(now=now, since=None, working_days=period.working, misclick=misclick),
+            )
+            found = await self.people(connection, set(users))
+        summaries = []
+        for user in users:
+            options = FlowOptions(
+                now=now,
+                since=period.since,
+                until=period.until,
+                working_days=period.working,
+                people=AssignmentFilter(people=frozenset({user})),
+                roles_of=roles_of,
+                usual=usual,
+                returns=rules,
+                misclick=misclick,
+            )
+            report = compute_flow(cards, columns, calendars, options)
+            _, _, returns = person_quality(cards, columns, options, user)
+            person = found.get(user)
+            summaries.append(
+                PersonSummary(
+                    user_id=user,
+                    name=person.name if person else f"#{user}",
+                    username=person.username if person else None,
+                    role_id=roles_of.get(user),
+                    in_progress=report.in_progress,
+                    stuck=sum(1 for card in report.stuck if card.level),
+                    finished=report.finished,
+                    lead_p50=report.lead_time.p50,
+                    cycle_p50=report.cycle_time.p50,
+                    passes=sum(column.passes for column in report.columns),
+                    clean_passes=sum(column.clean_passes for column in report.columns),
+                    returns=sum(returns.values()),
+                )
+            )
+        return sorted(summaries, key=lambda summary: summary.name.lower())
+
+    async def person_share(
+        self,
+        project_id: int,
+        item_type: str,
+        user_id: int,
+        *,
+        period: Period,
+        item_ids: Collection[int] | None = None,
+        every: bool = False,
+    ) -> PersonShare:
+        """The person's part of the time in every column of the card type."""
+        params = {"project_id": project_id, "item_type": item_type}
+        async with self.engine.connect() as connection:
+            columns, cards = await self.cards(connection, params, item_ids)
+            calendars = await self.calendars(connection, project_id)
+            column_roles, roles = await self.column_roles(connection, project_id, item_type)
+            role_id = (await self.member_roles(connection, project_id)).get(user_id)
+            rules, misclick = await self.return_options(connection, project_id, item_type)
+        options = FlowOptions(
+            now=datetime.now(UTC),
+            since=period.since,
+            until=period.until,
+            working_days=period.working,
+            misclick=misclick,
+            returns=rules,
+        )
+        return PersonShare(
+            role_id=role_id,
+            columns=person_share(
+                cards,
+                columns,
+                calendars,
+                options,
+                user_id=user_id,
+                role_id=role_id,
+                column_roles=column_roles,
+                every=every,
+            ),
+            roles=roles,
+        )
 
     @staticmethod
     async def member_roles(connection: AsyncConnection, project_id: int) -> dict[int, int | None]:

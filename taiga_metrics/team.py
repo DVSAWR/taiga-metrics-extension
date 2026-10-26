@@ -1,24 +1,28 @@
-"""Taiga's team statistics, the numbers of its Team page, read from its database.
+"""The achievements of a person page: Taiga's Team page counts and five of the extension.
 
 Taiga's five are computed exactly as Taiga computes them, including its own idea of
-closed (``is_closed`` of the status), so the page matches Taiga's. The extension adds
-five of its own: user stories created, cards brought to a Done column as the owner
-marked them, column changes made, comments written, and cards sent back for rework
-while the person was assigned. Total power adds every count times its weight, so the
-last one takes points away.
+closed (``is_closed`` of the status), so they match Taiga's. The extension adds five of
+its own: user stories created, cards brought to a Done column as the owner marked them,
+column changes made, comments written, and how much of the person's own work came back,
+the returns credited to them by the project's return rules. Total power adds every count
+times its weight, so the last one takes points away.
 """
 
 from __future__ import annotations
 
+from collections import Counter
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, Protocol
 
 from pydantic import BaseModel
 from sqlalchemy import text
 
-if TYPE_CHECKING:
-    from datetime import datetime
+from taiga_metrics.metrics.engine import FlowOptions, card_returns, in_period
+from taiga_metrics.metrics.loader import StoredFlowData
+from taiga_metrics.sync.history import ITEM_TYPES
 
-    from sqlalchemy.ext.asyncio import AsyncEngine
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 Source = Literal["taiga", "extension"]
 Module = Literal["issues", "tasks", "wiki"]
@@ -123,7 +127,7 @@ EXTENSION_METRICS: list[PowerMetric] = [
     PowerMetric(
         key="sent_back",
         title="Doombringer",
-        explanation="Cards sent back for rework",
+        explanation="Own cards that came back",
         icon="reload",
         module=None,
         source="extension",
@@ -236,55 +240,6 @@ STORED_COUNTS = {
          group by 1
         """
     ),
-    "sent_back": text(
-        """
-        with steps as (
-            select t.item_type, t.item_id, t.project_id, t.kind, t.happened_at,
-                   t.from_status_id, t.to_status_id,
-                   lag(t.happened_at) over (
-                       partition by t.item_type, t.item_id order by t.happened_at, t.history_id
-                   ) as entered_at
-              from transition t
-             where t.project_id = :project_id
-        ),
-        back as (
-            select s.item_type, s.item_id, s.happened_at
-              from steps s
-              join taiga_status source
-                on source.item_type = s.item_type and source.id = s.from_status_id
-              join taiga_status target
-                on target.item_type = s.item_type and target.id = s.to_status_id
-              left join column_type source_type
-                on source_type.project_id = s.project_id and source_type.item_type = s.item_type
-               and source_type.status_id = s.from_status_id
-              left join column_type target_type
-                on target_type.project_id = s.project_id and target_type.item_type = s.item_type
-               and target_type.status_id = s.to_status_id
-             where s.kind = 'move'
-               and (cast(:since as timestamptz) is null or s.happened_at >= :since) and (cast(:until as timestamptz) is null or s.happened_at < :until)
-               and (s.entered_at is null or s.happened_at - s.entered_at >= interval '5 minutes')
-               and source_type.type is distinct from 'cancelled'
-               and target_type.type is distinct from 'cancelled'
-               and (
-                   (target_type.type = 'rework' and source_type.type is distinct from 'rework')
-                   or (source_type.type = 'done' and target_type.type is distinct from 'done')
-                   or (target.position < source.position
-                       and source_type.type is distinct from 'rework')
-               )
-        )
-        select person as user_id, count(*) as total
-          from back b
-          cross join lateral (
-              select a.assignee_ids from assignment a
-               where a.item_type = b.item_type and a.item_id = b.item_id
-                 and a.happened_at < b.happened_at
-               order by a.happened_at desc, a.history_id desc
-               limit 1
-          ) assigned
-          cross join lateral unnest(assigned.assignee_ids) as person
-         group by 1
-        """
-    ),
 }
 
 MODULES = text(
@@ -296,6 +251,39 @@ MODULES = text(
      where id = :project_id
     """
 )
+
+
+async def credited_returns(
+    connection: AsyncConnection,
+    project_id: int,
+    since: datetime | None,
+    until: datetime | None,
+) -> dict[int, int]:
+    """How many returns of every card type each person is credited with in the period.
+
+    The project's return rules decide what counts and to whom it is credited.
+    """
+    data = StoredFlowData
+    counts: Counter[int] = Counter()
+    now = datetime.now(UTC)
+    for item_type in ITEM_TYPES.values():
+        params = {"project_id": project_id, "item_type": item_type}
+        columns, cards = await data.cards(connection, params)
+        rules, misclick = await data.return_options(connection, project_id, item_type)
+        by_id = {column.status_id: column for column in columns}
+        options = FlowOptions(
+            now=now,
+            since=since,
+            until=until,
+            working_days=True,
+            misclick=misclick,
+            returns=rules,
+        )
+        for card in cards:
+            for item in card_returns(card, by_id, options):
+                if in_period(item.happened_at, options):
+                    counts.update(item.credited)
+    return dict(counts)
 
 
 class TeamSource(Protocol):
@@ -333,6 +321,7 @@ class DatabaseTeamStats:
                 values[key] = {
                     row.user_id: row.total for row in await connection.execute(query, params)
                 }
+            values["sent_back"] = await credited_returns(connection, project_id, since, until)
         modules: list[Module] = []
         if row is not None:
             modules = [module for module in ("issues", "tasks", "wiki") if row._mapping[module]]

@@ -1,11 +1,11 @@
 # Taiga Metrics
 
-Flow and team metrics for self-hosted [Taiga](https://taiga.io): lead and cycle time, time in statuses, throughput, stuck cards, Scrum sprints and Kanban boards, per project and per person.
+Flow and team metrics for self-hosted [Taiga](https://taiga.io): lead and cycle time, time in statuses, throughput, stuck cards, sprints and Kanban boards, team activity, per project and per person.
 
 Taiga Metrics is an extension that runs next to your Taiga. It never changes Taiga. It needs no plugin and does not touch Taiga's code, containers, frontend, configuration or database schema. It reads Taiga's PostgreSQL directly and **read-only**: every connection is opened with `default_transaction_read_only=on`. Its own data lives in a separate PostgreSQL. People sign in with their usual Taiga username and password.
 
 - Works with any process: statuses, columns and roles are read from each project's settings, never assumed.
-- Only the sections switched on in Taiga's project settings are shown (Epics, Scrum, Kanban, Issues).
+- One screen for the project, each direction (a role and the statuses it answers for) and each person: key numbers, stuck cards, the split one level down, time in statuses, speed, period by period, and activity; any two to four of them can be compared. Only the card types switched on in Taiga are offered; sprints are Taiga's while Scrum is on; without Scrum the owner can set equal reporting periods (every 1 to 4 weeks) in Settings, Calendar.
 - Data is copied from Taiga every hour (configurable). You can also start a copy by hand.
 
 > Taiga Metrics is an independent open-source project. It is not affiliated with, endorsed by or supported by Taiga or Kaleidos Inc. Taiga is a trademark of its owners and is named here only to say what this extension works with.
@@ -92,17 +92,17 @@ docker compose -f docker-compose.yml -f taiga-metrics.yml up -d taiga-metrics ta
 
 Who sees what follows Taiga's accounts and roles:
 
-| Who                   | What they can do                                                      |
-| --------------------- | --------------------------------------------------------------------- |
-| Taiga superuser       | See and configure every project                                       |
-| Project owner, admins | See everything in their project and configure it                      |
-| Project member        | See only what the owner granted to their role; **nothing by default** |
+| Who                                                     | What they can do                                                                |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| Taiga superuser, or named in `TAIGA_METRICS_SUPERUSERS` | See and configure every project                                                 |
+| Project owner, admins                                   | See everything in their project and configure it                                |
+| Project member                                          | Their own page; other pages only as the owner granted to their role, tab by tab |
 
 For every project, the owner opens **Settings** in the extension and:
 
-1. **General:** marks each status as Queue, Work, Rework, Done or Cancelled, per card type. Work and Done are required. Until then lead time, cycle time and throughput are not measured.
+1. **General:** marks each status as Queue, Work, Done or Cancelled, per card type, and names the roles responsible for it. Work and Done are required. Until then lead time, cycle time and throughput are not measured. Going back is read from moves to an earlier status in Taiga's order and out of Done, so there is no separate type for it.
 2. **Calendar:** sets working days and hours, so durations can count working time.
-3. **Access:** chooses what each Taiga role may see.
+3. **Access:** chooses, section by section, what each Taiga role may see: Overview, Directions, Cards, and People (other people's numbers).
 
 Nothing is guessed from status names: two teams can call the same thing differently.
 
@@ -116,6 +116,7 @@ Put your settings in `taiga-metrics.env` next to `taiga-metrics.yml` and run `./
 | `TAIGA_METRICS_BIND`                  | `0.0.0.0`                                          | Address to listen on; `127.0.0.1` to reach it only through a reverse proxy on the same server |
 | `TAIGA_METRICS_DB_PASSWORD`           | `taiga_metrics`                                    | Password of the extension's own database; set it before the first start                       |
 | `TAIGA_METRICS_SYNC_INTERVAL_SECONDS` | `3600`                                             | How often Taiga's data is copied                                                              |
+| `TAIGA_METRICS_SUPERUSERS`            | empty                                              | Comma separated Taiga usernames who see and configure every project in the extension          |
 | `TAIGA_METRICS_TAIGA_DB_USER`         | `POSTGRES_USER` from Taiga's `.env`                | User for reading Taiga's database, see [below](#a-read-only-database-user-optional)           |
 | `TAIGA_METRICS_TAIGA_DB_PASSWORD`     | `POSTGRES_PASSWORD` from Taiga's `.env`            | Its password                                                                                  |
 | `TAIGA_METRICS_VERSION`               | the release you downloaded                         | Image version to run                                                                          |

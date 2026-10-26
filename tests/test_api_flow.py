@@ -71,16 +71,20 @@ def test_own_scope_measures_only_own_cards(
 ) -> None:
     """A member limited to own cards gets metrics of those cards only."""
     client.put(
-        "/api/projects/alpha/access/40", json={"pages": ["flow"], "scope": "own"}, headers=HEADERS
+        "/api/projects/alpha/access/40",
+        json={"pages": ["overview"], "scope": "own"},
+        headers=HEADERS,
     )
     assert member.get("/api/projects/alpha/flow").status_code == 200
     assert last_request(services)["item_ids"] == [3]
 
 
 def test_flow_needs_the_flow_page(client: TestClient, member: TestClient) -> None:
-    """A role allowed only Team does not get flow metrics."""
+    """A role allowed only Search does not get flow metrics."""
     client.put(
-        "/api/projects/alpha/access/40", json={"pages": ["team"], "scope": "all"}, headers=HEADERS
+        "/api/projects/alpha/access/40",
+        json={"pages": ["cards"], "scope": "all"},
+        headers=HEADERS,
     )
     assert member.get("/api/projects/alpha/flow").status_code == 403
 
@@ -178,7 +182,9 @@ def test_card_comments_follow_the_data_scope(
     """A member limited to own cards reads comments only on those cards."""
     add_comment(services, "task", 4, "Not yours")
     client.put(
-        "/api/projects/alpha/access/40", json={"pages": ["flow"], "scope": "own"}, headers=HEADERS
+        "/api/projects/alpha/access/40",
+        json={"pages": ["overview"], "scope": "own"},
+        headers=HEADERS,
     )
     assert member.get("/api/projects/alpha/cards/userstory/3/comments").status_code == 200
     assert member.get("/api/projects/alpha/cards/task/4/comments").status_code == 404
@@ -199,3 +205,25 @@ def test_durations_can_count_every_day(client: TestClient, services: Services) -
     client.get("/api/projects/alpha/cards/userstory/3/flow", params={"days": "calendar"})
     assert last_request(services) == {"card": 3, "working": False}
     assert client.get("/api/projects/alpha/flow", params={"days": "hours"}).status_code == 422
+
+
+def test_the_rest_of_people_is_everyone_else_on_the_same_cards(
+    client: TestClient, services: Services
+) -> None:
+    """With a person in the filters, the rest is the time others were assigned."""
+    client.get("/api/projects/alpha/flow", params=[("include", "assigned:6"), ("side", "rest")])
+    request = last_request(services)
+    assert request["people"] == AssignmentFilter(people=frozenset({6}), negated=True)
+    assert request["item_ids"] == [3]
+
+
+def test_the_rest_of_card_filters_is_every_other_card(
+    client: TestClient, services: Services
+) -> None:
+    """Without people in the filters, the rest is the cards the filters drop."""
+    client.get("/api/projects/alpha/flow", params=[("exclude", "assigned:6"), ("side", "rest")])
+    request = last_request(services)
+    assert request["people"] is None
+    assert request["item_ids"] == [3]
+    client.get("/api/projects/alpha/flow", params=[("side", "rest")])
+    assert last_request(services)["item_ids"] == []

@@ -4,7 +4,6 @@ import { Link, projectSettingsPath, type ProjectSettingsTab } from "../router";
 const TABS: { key: ProjectSettingsTab; label: string }[] = [
   { key: "access", label: "Access" },
   { key: "general", label: "General" },
-  { key: "calendar", label: "Calendar" },
   { key: "status", label: "System status" },
   { key: "sync", label: "Data sync" },
 ];

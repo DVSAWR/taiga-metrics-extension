@@ -74,8 +74,8 @@ def test_sync_shows_only_the_project(client: TestClient, admin: TestClient) -> N
 
 def test_members_cannot_sync(member: TestClient) -> None:
     """Only owners, admins, and superusers start syncs or see them."""
-    assert member.post("/api/projects/alpha/sync", headers=HEADERS).status_code == 404
-    assert member.get("/api/projects/alpha/sync/summary").status_code == 404
+    assert member.post("/api/projects/alpha/sync", headers=HEADERS).status_code == 403
+    assert member.get("/api/projects/alpha/sync/summary").status_code == 403
 
 
 def test_config_is_public_and_trims_the_taiga_url() -> None:

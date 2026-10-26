@@ -16,14 +16,16 @@ from taiga_metrics.metrics.engine import (
     FlowOptions,
     PersonMoves,
     Step,
+    card_report,
     compute_flow,
     finish_time,
     intervals_of,
     stay_level,
     stays_of,
+    usual_stays,
     with_levels,
-    without_columns,
 )
+from taiga_metrics.metrics.returns import ReturnRules
 
 MONDAY = datetime(2026, 9, 21, 9, tzinfo=UTC)
 NEW, READY, DOING, REVIEW, DONE, ARCHIVED, REJECTED = 1, 2, 3, 4, 5, 6, 7
@@ -89,6 +91,16 @@ def test_intervals_follow_the_moves() -> None:
         (NEW, at(0), at(1), 5),
         (READY, at(1), at(3), 6),
         (DOING, at(3), None, None),
+    ]
+
+
+def test_an_unrecorded_last_move_leaves_the_card_where_the_board_shows_it() -> None:
+    """A current column the history never reached takes the open stay."""
+    item = dataclasses.replace(card(1, (1, READY, 5)), status_id=DOING)
+    stays = intervals_of(item, at(10))
+    assert [(s.status_id, s.start, s.end) for s in stays] == [
+        (NEW, at(0), at(1)),
+        (DOING, at(1), None),
     ]
 
 
@@ -176,6 +188,104 @@ def test_back_moves_and_reopens_are_counted() -> None:
     moves = {(m.from_status, m.to_status): (m.count, m.reopen) for m in report.back_moves.moves}
     assert moves == {(REVIEW, DOING): (1, False), (DONE, REVIEW): (1, True)}
     assert report.back_moves.cards_with_back_moves == 1
+    assert len(report.back_moves.cases) == 2
+    assert all(case.kind == "direct" for case in report.back_moves.cases)
+    assert len(report.back_moves.events) == sum(move.count for move in report.back_moves.moves)
+    assert [(event.from_status, event.to_status) for event in report.back_moves.events] == [
+        (DONE, REVIEW),
+        (REVIEW, DOING),
+    ]
+    assert len(report.first_passes) == sum(column.passes for column in report.columns)
+    assert sum(event.clean for event in report.first_passes) == sum(
+        column.clean_passes for column in report.columns
+    )
+
+
+def test_rework_keeps_two_events_in_one_case_across_periods() -> None:
+    """Detection and routing are independently dated, but remain one linked case."""
+    rework = 8
+    columns = [*COLUMNS, Column(rework, "REWORK", "#d35460", 4, "work")]
+    item = card(1, (1, DOING, 5), (2, REVIEW, 6), (3, rework, 7), (5, DOING, 7))
+    chosen = dataclasses.replace(
+        options(),
+        returns=ReturnRules(marked=frozenset({(REVIEW, rework), (rework, DOING)})),
+    )
+    complete = compute_flow([item], columns, CALENDARS, chosen).back_moves
+    assert {(move.from_status, move.to_status) for move in complete.moves} == {
+        (REVIEW, rework),
+        (rework, DOING),
+    }
+    assert (complete.rework_entries, complete.rework_routes, len(complete.cases)) == (1, 1, 1)
+    assert [(event.from_status, event.to_status) for event in complete.events] == [
+        (rework, DOING),
+        (REVIEW, rework),
+    ]
+    assert complete.cases[0].kind == "rework"
+    assert (complete.cases[0].detected_at, complete.cases[0].routed_at) == (at(3), at(5))
+    assert complete.cases[0].routed_to == DOING
+
+    detection = compute_flow(
+        [item], columns, CALENDARS, dataclasses.replace(chosen, until=at(4))
+    ).back_moves
+    assert (detection.rework_entries, detection.rework_routes, len(detection.cases)) == (1, 0, 1)
+    assert detection.cases[0].routed_at is None
+
+    routing = compute_flow(
+        [item], columns, CALENDARS, dataclasses.replace(chosen, since=at(4))
+    ).back_moves
+    assert (routing.rework_entries, routing.rework_routes, len(routing.cases)) == (0, 1, 0)
+
+
+def test_rework_does_not_merge_two_separate_rejections_of_one_card() -> None:
+    """Each new detection starts a case even when it is on the same user story."""
+    rework = 8
+    columns = [*COLUMNS, Column(rework, "REWORK", "#d35460", 4, "work")]
+    item = card(
+        1,
+        (1, DOING, 5),
+        (2, REVIEW, 6),
+        (3, rework, 7),
+        (4, DOING, 7),
+        (5, REVIEW, 5),
+        (6, rework, 6),
+        (7, DOING, 6),
+    )
+    chosen = dataclasses.replace(
+        options(),
+        returns=ReturnRules(marked=frozenset({(REVIEW, rework), (rework, DOING)})),
+    )
+    returned = compute_flow([item], columns, CALENDARS, chosen).back_moves
+    assert (returned.rework_entries, returned.rework_routes, len(returned.cases)) == (2, 2, 2)
+    assert [(case.detected_at, case.routed_at) for case in returned.cases] == [
+        (at(6), at(7)),
+        (at(3), at(4)),
+    ]
+
+
+def test_card_report_uses_the_same_return_rules_as_project_flow() -> None:
+    """A disabled return rule cannot still produce a return on the card page."""
+    item = card(1, (1, DOING, 5), (2, REVIEW, 6), (3, DOING, 7))
+    chosen = dataclasses.replace(options(), returns=ReturnRules(earlier=False, out_of_done=False))
+    assert compute_flow([item], COLUMNS, CALENDARS, chosen).back_moves.moves == ()
+    assert card_report(item, COLUMNS, CALENDARS, chosen).back_moves == 0
+
+
+def test_finished_in_an_old_period_survives_a_later_reopening() -> None:
+    """A later return changes the current state, not an earlier period's accepted result."""
+    item = card(1, (1, DOING, 5), (2, DONE, 5), (5, DOING, 6))
+    assert finish_time(item, TYPES) is None
+    assert finish_time(item, TYPES, as_of=at(4)) == at(2)
+    early = compute_flow(
+        [item], COLUMNS, CALENDARS, dataclasses.replace(options(), since=at(1), until=at(4))
+    )
+    late = compute_flow(
+        [item], COLUMNS, CALENDARS, dataclasses.replace(options(), since=at(4), until=at(7))
+    )
+    assert early.finished == 1
+    assert late.finished == 0
+    deleted_later = card(2, (1, DOING, 5), (2, DONE, 5), (5, DELETE, 6))
+    assert finish_time(deleted_later, TYPES) is None
+    assert finish_time(deleted_later, TYPES, as_of=at(4)) == at(2)
 
 
 def test_moves_list_the_cards_newest_first() -> None:
@@ -278,6 +388,29 @@ def test_finished_and_cancelled_cards_are_not_stuck() -> None:
     assert report.stuck == ()
 
 
+def test_stuck_is_judged_against_the_whole_history() -> None:
+    """Past stays outside the report still set what is usual; the report alone has none."""
+    history = [card(item, (0, DOING, 5), (1, REVIEW, 5)) for item in range(1, 5)]
+    doing = card(9, (0, DOING, 5), assignees=frozenset({5}))
+    alone = compute_flow([doing], COLUMNS, CALENDARS, options(now_days=10))
+    assert alone.stuck[0].level is None
+    usual = usual_stays([*history, doing], CALENDARS, options(now_days=10))
+    judged = compute_flow(
+        [doing], COLUMNS, CALENDARS, dataclasses.replace(options(now_days=10), usual=usual)
+    )
+    assert judged.stuck[0].level == "red"
+
+
+def test_only_cards_in_work_columns_can_be_stuck() -> None:
+    """A card waiting in a queue far longer than usual is listed but never stuck."""
+    history = [card(item, (1, READY, 5)) for item in range(1, 5)]
+    waiting = card(9, assignees=frozenset({5}))
+    report = compute_flow([*history, waiting], COLUMNS, CALENDARS, options(now_days=30))
+    flagged = [item for item in report.stuck if item.item_id == 9]
+    assert flagged
+    assert flagged[0].level is None
+
+
 def test_a_column_lists_every_card_standing_in_it() -> None:
     """Asked for one column, the report lists its cards now, even in a done column."""
     cards = [card(1, (1, DONE, 5)), card(2, (2, DONE, 5)), card(3, (1, DOING, 5))]
@@ -287,13 +420,6 @@ def test_a_column_lists_every_card_standing_in_it() -> None:
     assert [item.item_id for item in report.current] == [1, 2]
     assert [item.days_in_column for item in report.current] == pytest.approx([9.0, 8.0])
     assert compute_flow(cards, COLUMNS, CALENDARS, options()).current == ()
-
-
-def test_hidden_columns_leave_the_current_cards() -> None:
-    """Cards standing in a hidden column are not listed."""
-    options_now = dataclasses.replace(options(now_days=10), column=DONE)
-    report = compute_flow([card(1, (1, DONE, 5))], COLUMNS, CALENDARS, options_now)
-    assert without_columns(report, {DONE}).current == ()
 
 
 def test_archiving_a_cancelled_card_is_not_finishing_it() -> None:
@@ -416,15 +542,61 @@ def test_unassigned_moves_have_no_person() -> None:
 def test_stuck_and_in_progress_follow_current_assignees() -> None:
     """A card handed over is no longer stuck or in progress for the previous person."""
     doing = dataclasses.replace(
-        card(1, (1, DOING, 5)),
+        card(1, (1, DOING, 5), last_activity=at(1)),
         assignees=frozenset({6}),
         assignments=((at(0), frozenset({5})), (at(2), frozenset({6}))),
     )
-    assert compute_flow([doing], COLUMNS, CALENDARS, for_people(5)).in_progress == 0
-    assert compute_flow([doing], COLUMNS, CALENDARS, for_people(5)).stuck == ()
+    previous = compute_flow([doing], COLUMNS, CALENDARS, for_people(5))
+    assert previous.in_progress == 0
+    assert previous.stuck == ()
+    assert (
+        next(column for column in previous.columns if column.status_id == DOING).in_column_now == 0
+    )
+    assert not any(card.now for card in previous.column_cards)
     report = compute_flow([doing], COLUMNS, CALENDARS, for_people(6, now_days=10))
     assert report.in_progress == 1
     assert report.stuck[0].days_in_column == pytest.approx(8)
+    assert report.stuck[0].days_idle == pytest.approx(8)
+
+
+def test_new_coassignee_gets_only_idle_time_since_assignment() -> None:
+    """Adding a second executor does not charge them the card's earlier idle days."""
+    doing = dataclasses.replace(
+        card(1, (1, DOING, 5), assignees=frozenset({5, 6}), last_activity=at(2)),
+        assignments=((at(0), frozenset({5})), (at(8), frozenset({5, 6}))),
+    )
+    project = compute_flow([doing], COLUMNS, CALENDARS, options(now_days=10))
+    first = compute_flow([doing], COLUMNS, CALENDARS, for_people(5, now_days=10))
+    added = compute_flow([doing], COLUMNS, CALENDARS, for_people(6, now_days=10))
+    assert (project.stuck[0].days_in_column, project.stuck[0].days_idle) == (9, 8)
+    assert (first.stuck[0].days_in_column, first.stuck[0].days_idle) == (9, 8)
+    assert (added.stuck[0].days_in_column, added.stuck[0].days_idle) == (2, 2)
+    assert next(row for row in added.column_cards if row.now).days == 2
+    at_period_end = dataclasses.replace(for_people(6, now_days=10), until=at(9))
+    historical = compute_flow([doing], COLUMNS, CALENDARS, at_period_end)
+    assert (historical.stuck_at_end[0].days_in_column, historical.stuck_at_end[0].days_idle) == (
+        1,
+        1,
+    )
+
+
+def test_people_and_the_rest_add_up_to_the_whole() -> None:
+    """The time of person 5 and of everyone else together is the card's whole time."""
+    whole = compute_flow([handed_over()], COLUMNS, CALENDARS, options())
+    mine = compute_flow([handed_over()], COLUMNS, CALENDARS, for_people(5))
+    rest = compute_flow(
+        [handed_over()],
+        COLUMNS,
+        CALENDARS,
+        dataclasses.replace(options(), people=AssignmentFilter(people=frozenset({5})).rest()),
+    )
+    for status in (NEW, DOING, REVIEW):
+        times = [
+            {time.status_id: time for time in report.columns}[status].p50 or 0
+            for report in (whole, mine, rest)
+        ]
+        assert times[0] == pytest.approx(times[1] + times[2])
+    assert mine.finished + rest.finished == whole.finished
 
 
 def test_roles_filter_uses_members_roles() -> None:
@@ -435,34 +607,50 @@ def test_roles_filter_uses_members_roles() -> None:
     assert compute_flow([handed_over()], COLUMNS, CALENDARS, by_role).finished == 1
 
 
-def test_entering_rework_is_going_back_and_leaving_it_is_not() -> None:
-    """A Rework column after Review still counts as work going back."""
-    columns = [*COLUMNS[:4], Column(8, "Rework", "#e44057", 5, "rework"), *COLUMNS[4:]]
+def test_going_back_is_read_from_the_column_order_only() -> None:
+    """A move to an earlier column goes back; moving on from it is the work resuming."""
     report = compute_flow(
-        [card(1, (1, DOING, 5), (2, REVIEW, 5), (3, 8, 5), (4, REVIEW, 5), (5, DONE, 5))],
-        columns,
+        [card(1, (1, DOING, 5), (2, REVIEW, 5), (3, DOING, 5), (4, REVIEW, 5), (5, DONE, 5))],
+        COLUMNS,
         CALENDARS,
         options(),
     )
     assert [
-        (move.from_status, move.to_status, move.rework) for move in report.back_moves.moves
-    ] == [(REVIEW, 8, True)]
-    assert report.cycle_time.p50 == pytest.approx(4)
+        (move.from_status, move.to_status, move.reopen) for move in report.back_moves.moves
+    ] == [(REVIEW, DOING, False)]
+    assert report.back_moves.cards_with_back_moves == 1
 
 
-def test_cards_in_rework_are_in_progress() -> None:
-    """Being reworked is being worked on."""
-    columns = [*COLUMNS, Column(8, "Rework", "#e44057", 8, "rework")]
-    report = compute_flow([card(1, (1, DOING, 5), (2, 8, 5))], columns, CALENDARS, options())
-    assert report.in_progress == 1
+def test_a_period_lists_the_columns_it_used() -> None:
+    """A removed column shows in the period it held cards; an unused one does not."""
+    columns = [*COLUMNS, Column(9, "Old review", "#999999", 4, "work", is_deleted=True)]
+    cards = [card(1, (1, 9, 5), (3, DONE, 5))]
+    early = dataclasses.replace(options(now_days=30), until=at(5))
+    late = dataclasses.replace(options(now_days=30), since=at(10))
+    used_early = {
+        column.status_id
+        for column in compute_flow(cards, columns, CALENDARS, early).columns
+        if column.used
+    }
+    used_late = {
+        column.status_id
+        for column in compute_flow(cards, columns, CALENDARS, late).columns
+        if column.used
+    }
+    assert 9 in used_early
+    assert 9 not in used_late
+    assert REVIEW not in used_early
 
 
-def test_hidden_columns_leave_the_tables_but_not_the_times() -> None:
-    """A removed column disappears from rows and moves; lead time keeps its time."""
-    report = compute_flow(
-        [card(1, (1, DOING, 5), (2, REVIEW, 5), (3, DONE, 5))], COLUMNS, CALENDARS, options()
+def test_stuck_at_the_end_of_a_past_period_is_kept() -> None:
+    """A card stuck in Doing on day 10 and finished on day 20 was stuck then, not now."""
+    history = [card(item, (0, DOING, 5), (1, REVIEW, 5)) for item in range(1, 5)]
+    late = dataclasses.replace(
+        card(9, (0, DOING, 5), (20, DONE, 5)),
+        assignees=frozenset({5}),
+        assignments=((at(0), frozenset({5})),),
     )
-    hidden = without_columns(report, {REVIEW})
-    assert REVIEW not in {column.status_id for column in hidden.columns}
-    assert all(REVIEW not in (move.from_status, move.to_status) for move in hidden.moves)
-    assert hidden.lead_time == report.lead_time
+    period = dataclasses.replace(options(now_days=30), until=at(10))
+    report = compute_flow([*history, late], COLUMNS, CALENDARS, period)
+    assert all(item.item_id != 9 for item in report.stuck)
+    assert [item.item_id for item in report.stuck_at_end if item.level] == [9]

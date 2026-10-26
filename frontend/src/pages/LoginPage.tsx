@@ -2,7 +2,7 @@ import { useState, type FormEvent } from "react";
 
 import { ApiError, login, type Me } from "../api";
 import { BrandLogo } from "../components/BrandLogo";
-import { INDEPENDENT_NOTE } from "../components/Navbar";
+import { INDEPENDENT_NOTE } from "../components/Sidebar";
 
 export function LoginPage({
   taigaUrl,

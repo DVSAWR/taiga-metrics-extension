@@ -33,7 +33,14 @@ export interface HealthReport {
   metrics_db: MetricsDbStatus;
 }
 
-export type Page = "flow" | "search" | "team";
+export type Page =
+  | "overview"
+  | "directions"
+  | "people"
+  | "my_page"
+  | "trends"
+  | "activity"
+  | "cards";
 export type Scope = "all" | "own";
 
 export interface AccessInfo {
@@ -52,6 +59,7 @@ export interface ProjectSummary {
   has_scrum: boolean;
   has_kanban: boolean;
   has_sprints: boolean;
+  has_periods: boolean;
   access: AccessInfo;
 }
 
@@ -296,16 +304,6 @@ export function fetchConfig(): Promise<UiConfig> {
   return getJson<UiConfig>("/api/config");
 }
 
-export interface Member {
-  user_id: number;
-  username: string;
-  full_name: string;
-  role: string;
-  is_owner: boolean;
-  is_admin: boolean;
-  is_active: boolean;
-}
-
 export interface Person {
   id: number;
   name: string;
@@ -331,6 +329,10 @@ export interface CardEvent {
   kind: "create" | "move" | "delete" | "assign";
   from_status: string | null;
   to_status: string | null;
+  from_status_id: number | null;
+  to_status_id: number | null;
+  from_color: string | null;
+  to_color: string | null;
   assignees: Person[] | null;
   user: Person | null;
 }
@@ -537,10 +539,6 @@ export function fetchPeriodStays(
   return getJson<PeriodStays>(`${projectApi(slug)}/scrum/stays?${params}`);
 }
 
-export function fetchMembers(slug: string): Promise<Member[]> {
-  return getJson<Member[]>(`${projectApi(slug)}/members`);
-}
-
 export function searchCards(
   slug: string,
   query: string,
@@ -669,7 +667,7 @@ export function updateRoleAccess(
   });
 }
 
-export type ColumnType = "queue" | "work" | "rework" | "done" | "cancelled";
+export type ColumnType = "queue" | "work" | "done" | "cancelled";
 
 export interface ColumnInfo {
   status_id: number;
@@ -681,27 +679,90 @@ export interface ColumnInfo {
   is_deleted: boolean;
   cards: number;
   type: ColumnType | null;
+  roles: number[];
+  return_mode: ColumnMode;
+}
+
+export type ColumnMode = "normal" | "pause" | "triage";
+export type Credit = "assignees" | "author" | "everyone" | "author_reviewer";
+
+export interface ReturnSettings {
+  earlier: boolean;
+  out_of_done: boolean;
+  misclick_minutes: number;
+  credit: Credit;
+}
+
+export function setReturnSettings(
+  slug: string,
+  itemType: ItemType,
+  settings: ReturnSettings,
+): Promise<void> {
+  return request<void>(`${projectApi(slug)}/returns/${itemType}`, {
+    method: "PUT",
+    body: JSON.stringify(settings),
+  });
+}
+
+export function setColumnReturn(
+  slug: string,
+  itemType: ItemType,
+  statusId: number,
+  mode: ColumnMode,
+): Promise<void> {
+  return request<void>(`${projectApi(slug)}/columns/${itemType}/${statusId}/return`, {
+    method: "PUT",
+    body: JSON.stringify({ mode }),
+  });
 }
 
 export interface ItemTypeColumns {
   item_type: ItemType;
   columns: ColumnInfo[];
-  show_removed: boolean;
+  returns: ReturnSettings;
+  return_pairs: ReturnPair[];
 }
 
-export function setShowRemoved(
+export interface ReturnPair {
+  from_status: number;
+  to_status: number;
+  is_return: boolean;
+}
+
+export function setReturnPairs(
   slug: string,
   itemType: ItemType,
-  showRemoved: boolean,
+  pairs: ReturnPair[],
 ): Promise<void> {
-  return request<void>(`${projectApi(slug)}/removed-columns/${itemType}`, {
+  return request<void>(`${projectApi(slug)}/returns/${itemType}/pairs`, {
     method: "PUT",
-    body: JSON.stringify({ show_removed: showRemoved }),
+    body: JSON.stringify({ pairs }),
   });
 }
 
 export function fetchColumns(slug: string): Promise<ItemTypeColumns[]> {
   return getJson<ItemTypeColumns[]>(`${projectApi(slug)}/columns`);
+}
+
+export interface RoleRef {
+  id: number;
+  name: string;
+}
+
+export function fetchRoles(slug: string): Promise<RoleRef[]> {
+  return getJson<RoleRef[]>(`${projectApi(slug)}/roles`);
+}
+
+export function setColumnRoles(
+  slug: string,
+  itemType: ItemType,
+  statusId: number,
+  roleIds: number[],
+): Promise<void> {
+  return request<void>(`${projectApi(slug)}/columns/${itemType}/${statusId}/roles`, {
+    method: "PUT",
+    body: JSON.stringify({ role_ids: roleIds }),
+  });
 }
 
 export function setColumnType(
@@ -766,6 +827,9 @@ export interface ColumnTime {
   p85: number | null;
   p95: number | null;
   in_column_now: number;
+  used: boolean;
+  passes: number;
+  clean_passes: number;
 }
 
 export interface Sample {
@@ -808,7 +872,40 @@ export interface BackMove {
   to_status: number;
   count: number;
   reopen: boolean;
-  rework: boolean;
+  credited_status: number | null;
+}
+
+export interface ReturnEvent {
+  item_id: number;
+  ref: number | null;
+  subject: string;
+  happened_at: string;
+  from_status: number;
+  to_status: number;
+  credited_status: number;
+  credited: number[];
+}
+
+export interface FirstPassEvent {
+  item_id: number;
+  ref: number | null;
+  subject: string;
+  status_id: number;
+  passed_at: string;
+  author: number | null;
+  clean: boolean;
+}
+
+export interface ReturnCase {
+  item_id: number;
+  ref: number | null;
+  subject: string;
+  kind: "direct" | "rework" | "unlinked_route";
+  detected_at: string;
+  from_status: number;
+  to_status: number;
+  routed_at: string | null;
+  routed_to: number | null;
 }
 
 export interface MoveEvent {
@@ -864,14 +961,20 @@ export interface FlowReport {
     moves: BackMove[];
     cards_moved: number;
     cards_with_back_moves: number;
+    cases: ReturnCase[];
+    rework_entries: number;
+    rework_routes: number;
+    events: ReturnEvent[];
   };
   stuck: StuckCard[];
+  stuck_at_end: StuckCard[];
   moves: MoveCount[];
   moves_by_assignee: PersonMoves[];
   moves_by_mover: PersonMoves[];
   current: StuckCard[];
   column_cards: ColumnCard[];
   finishes: FinishedCard[];
+  first_passes: FirstPassEvent[];
 }
 
 export interface ColumnCard {
@@ -891,6 +994,8 @@ export interface FlowResponse {
   report: FlowReport;
   people: Record<string, string>;
   usernames: Record<string, string>;
+  column_roles: Record<string, number[]>;
+  roles: Record<string, string>;
   period_start: string | null;
   period_end: string | null;
   generated_at: string;
@@ -904,10 +1009,14 @@ export function fetchFlow(
   selection: FilterSelection,
   period: Period,
   column: number | null = null,
+  rest = false,
 ): Promise<FlowResponse> {
   const params = new URLSearchParams({ item_type: itemType });
   if (column !== null) {
     params.set("column", String(column));
+  }
+  if (rest) {
+    params.set("side", "rest");
   }
   addSelection(params, selection);
   addPeriod(params, period);
@@ -1003,14 +1112,376 @@ export interface PowerMetric {
   weight: number;
 }
 
-export interface TeamStats {
+export interface PersonProfile {
+  id: number;
+  name: string;
+  username: string;
+  role: string | null;
+  role_id: number | null;
+  is_member: boolean;
+  is_owner: boolean;
+  is_admin: boolean;
+  is_active: boolean;
+  item_types: ItemType[];
+}
+
+export interface PersonPage {
+  profile: PersonProfile;
   metrics: PowerMetric[];
-  values: Record<string, Record<string, number>>;
+  values: Record<string, number>;
+  highest: Record<string, number>;
   modules: ("issues" | "tasks" | "wiki")[];
 }
 
-export function fetchTeamStats(slug: string, period: Period): Promise<TeamStats> {
+export type ActivityKind = "create" | "move" | "assign" | "comment" | "edit" | "delete";
+
+export interface ActivityEvent {
+  id: string;
+  happened_at: string;
+  day: string;
+  kind: ActivityKind;
+  item_type: ItemType | null;
+  item_id: number | null;
+  ref: number | null;
+  subject: string | null;
+  is_deleted: boolean;
+  other: string | null;
+  from_status_id: number | null;
+  to_status_id: number | null;
+  from_status: string | null;
+  to_status: string | null;
+  from_color: string | null;
+  to_color: string | null;
+  fields: string[];
+  comment: string | null;
+}
+
+export interface ActivityDay {
+  day: string;
+  counts: Partial<Record<ActivityKind, number>>;
+}
+
+export interface PersonActivity {
+  events: ActivityEvent[];
+  days: ActivityDay[];
+  totals: Partial<Record<ActivityKind, number>>;
+  total: number;
+  truncated: boolean;
+}
+
+function personApi(slug: string, userId: number): string {
+  return `${projectApi(slug)}/people/${userId}`;
+}
+
+export function fetchPerson(slug: string, userId: number, period: Period): Promise<PersonPage> {
   const params = new URLSearchParams();
   addPeriod(params, period);
-  return getJson<TeamStats>(`${projectApi(slug)}/team-stats?${params}`);
+  return getJson<PersonPage>(`${personApi(slug, userId)}?${params}`);
+}
+
+export function fetchPersonFlow(
+  slug: string,
+  userId: number,
+  itemType: ItemType,
+  period: Period,
+): Promise<FlowResponse> {
+  const params = new URLSearchParams({ item_type: itemType });
+  addPeriod(params, period);
+  return getJson<FlowResponse>(`${personApi(slug, userId)}/flow?${params}`);
+}
+
+export function fetchPersonActivity(
+  slug: string,
+  userId: number,
+  period: Period,
+): Promise<PersonActivity> {
+  const params = new URLSearchParams();
+  addPeriod(params, period);
+  return getJson<PersonActivity>(`${personApi(slug, userId)}/activity?${params}`);
+}
+
+export interface TeamActivityDay {
+  day: string;
+  counts: Partial<Record<ActivityKind, number>>;
+  person_kinds: Record<string, Partial<Record<ActivityKind, number>>>;
+  people: Record<string, number>;
+}
+
+export interface TeamActivity {
+  days: TeamActivityDay[];
+  totals: Partial<Record<ActivityKind, number>>;
+  total: number;
+  people: Record<string, string>;
+}
+
+export function fetchTeamActivity(
+  slug: string,
+  period: Period,
+  role: number | null = null,
+  person: number | null = null,
+): Promise<TeamActivity> {
+  const params = new URLSearchParams();
+  addPeriod(params, period);
+  if (role !== null) {
+    params.set("role", String(role));
+  }
+  if (person !== null) {
+    params.set("person", String(person));
+  }
+  return getJson<TeamActivity>(`${projectApi(slug)}/activity?${params}`);
+}
+
+export interface TeamEvent extends ActivityEvent {
+  user_id: number;
+  user_name: string;
+}
+
+export interface TeamEvents {
+  events: TeamEvent[];
+  total: number;
+  truncated: boolean;
+}
+
+export function fetchTeamEvents(
+  slug: string,
+  period: Period,
+  role: number | null,
+  person: number | null,
+  kind: ActivityKind | null,
+): Promise<TeamEvents> {
+  const params = new URLSearchParams();
+  addPeriod(params, period);
+  if (role !== null) {
+    params.set("role", String(role));
+  }
+  if (person !== null) {
+    params.set("person", String(person));
+  }
+  if (kind !== null) {
+    params.set("kind", kind);
+  }
+  return getJson<TeamEvents>(`${projectApi(slug)}/activity/events?${params}`);
+}
+
+export interface ColumnShare {
+  status_id: number;
+  name: string;
+  color: string;
+  type: ColumnType | null;
+  roles: number[];
+  stays: number;
+  days: number;
+  person_stays: number;
+  person_days: number;
+  share: number | null;
+  p50: number | null;
+  person_p50: number | null;
+  now: number;
+  person_now: number;
+  passes: number;
+  clean_passes: number;
+  returns: number;
+}
+
+export interface PersonShare {
+  role_id: number | null;
+  columns: ColumnShare[];
+  roles: Record<string, string>;
+}
+
+export function fetchPersonShare(
+  slug: string,
+  userId: number,
+  itemType: ItemType,
+  period: Period,
+): Promise<PersonShare> {
+  const params = new URLSearchParams({ item_type: itemType });
+  addPeriod(params, period);
+  return getJson<PersonShare>(`${personApi(slug, userId)}/share?${params}`);
+}
+
+export interface Cadence {
+  weeks: number | null;
+  start: string | null;
+}
+
+export interface ReportingSettings {
+  scrum: boolean;
+  taiga_sprints: number;
+  cadence: Cadence;
+}
+
+export const PROJECTS_CHANGED_EVENT = "taiga-metrics:projects-changed";
+
+export function fetchReporting(slug: string): Promise<ReportingSettings> {
+  return getJson<ReportingSettings>(`${projectApi(slug)}/reporting`);
+}
+
+export async function saveReporting(slug: string, cadence: Cadence): Promise<void> {
+  await request<void>(`${projectApi(slug)}/reporting`, {
+    method: "PUT",
+    body: JSON.stringify(cadence),
+  });
+  window.dispatchEvent(new Event(PROJECTS_CHANGED_EVENT));
+}
+
+export interface DirectionRef {
+  role_id: number;
+  name: string;
+  columns: Partial<Record<ItemType, number[]>>;
+  members: number[];
+}
+
+export interface DirectionColumn {
+  time: ColumnTime;
+  wip_limit: number | null;
+}
+
+export interface DirectionPerson {
+  user_id: number;
+  member: boolean;
+  stays: number;
+  days: number;
+  share: number | null;
+  p50: number | null;
+  passes: number;
+  clean_passes: number;
+  returns: number;
+}
+
+export interface DirectionFlow {
+  columns: DirectionColumn[];
+  in_now: number;
+  stuck: StuckCard[];
+  passed: number;
+  returned: BackMove[];
+  sent_back: BackMove[];
+  stays: number;
+  days: number;
+  people: DirectionPerson[];
+  names: Record<string, string>;
+  usernames: Record<string, string>;
+}
+
+export function fetchDirections(slug: string): Promise<DirectionRef[]> {
+  return getJson<DirectionRef[]>(`${projectApi(slug)}/directions`);
+}
+
+export function fetchDirectionSummary(
+  slug: string,
+  itemType: ItemType,
+  period: Period,
+): Promise<BreakdownRow[]> {
+  const params = new URLSearchParams({ item_type: itemType });
+  addPeriod(params, period);
+  return getJson<BreakdownRow[]>(`${projectApi(slug)}/directions/summary?${params}`);
+}
+
+export function fetchDirection(
+  slug: string,
+  roleId: number,
+  itemType: ItemType,
+  period: Period,
+): Promise<DirectionFlow> {
+  const params = new URLSearchParams({ item_type: itemType });
+  addPeriod(params, period);
+  return getJson<DirectionFlow>(`${projectApi(slug)}/directions/${roleId}?${params}`);
+}
+
+export type SubjectKind = "project" | "role" | "person";
+
+export interface Subject {
+  kind: SubjectKind;
+  id: number | null;
+}
+
+export interface Tiles {
+  in_progress: number;
+  stuck: number;
+  finished: number;
+  lead_p50: number | null;
+  lead_p85: number | null;
+  cycle_p50: number | null;
+  cycle_p85: number | null;
+  passes: number;
+  clean_passes: number;
+  returns: number;
+}
+
+export interface BreakdownRow {
+  kind: "role" | "person" | "status";
+  id: number;
+  name: string;
+  statuses: number[];
+  color: string | null;
+  member: boolean | null;
+  in_now: number;
+  stuck: number;
+  done: number;
+  p50: number | null;
+  share: number | null;
+  passes: number;
+  clean_passes: number;
+  returns: number;
+}
+
+export interface Analysis {
+  subject: Subject;
+  name: string;
+  tiles: Tiles;
+  breakdown: BreakdownRow[];
+  flow: FlowResponse;
+  statuses: number[] | null;
+  compared: number[] | null;
+}
+
+export function subjectKey(subject: Subject): string {
+  return subject.kind === "project" ? "project" : `${subject.kind}:${subject.id}`;
+}
+
+export function parseSubject(value: string): Subject | null {
+  if (value === "project") {
+    return { kind: "project", id: null };
+  }
+  const [kind, raw] = value.split(":");
+  const id = Number(raw);
+  return (kind === "role" || kind === "person") && Number.isInteger(id) ? { kind, id } : null;
+}
+
+export function fetchAnalysis(
+  slug: string,
+  subject: Subject,
+  itemType: ItemType,
+  selection: FilterSelection,
+  period: Period,
+): Promise<Analysis> {
+  const params = new URLSearchParams({ scope: subjectKey(subject), item_type: itemType });
+  addSelection(params, selection);
+  addPeriod(params, period);
+  return getJson<Analysis>(`${projectApi(slug)}/analysis?${params}`);
+}
+
+export interface PersonSummary {
+  user_id: number;
+  name: string;
+  username: string | null;
+  role_id: number | null;
+  in_progress: number;
+  stuck: number;
+  finished: number;
+  lead_p50: number | null;
+  cycle_p50: number | null;
+  passes: number;
+  clean_passes: number;
+  returns: number;
+}
+
+export function fetchPeopleSummary(
+  slug: string,
+  itemType: ItemType,
+  period: Period,
+): Promise<PersonSummary[]> {
+  const params = new URLSearchParams({ item_type: itemType });
+  addPeriod(params, period);
+  return getJson<PersonSummary[]>(`${projectApi(slug)}/people?${params}`);
 }

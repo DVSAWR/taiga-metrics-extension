@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     ``community_url`` and ``repository_url`` are the links of the help menu.
     ``media_dir`` is Taiga's media folder mounted read-only, for photos and logos;
     without it everyone gets the placeholder.
+    ``superusers`` is a comma separated list of Taiga usernames who see and configure
+    every project in the extension, as Taiga's superusers do; Taiga itself is unchanged.
     """
 
     model_config = SettingsConfigDict(env_prefix="TAIGA_METRICS_")
@@ -41,6 +43,7 @@ class Settings(BaseSettings):
     community_url: str = "https://community.taiga.io/"
     repository_url: str = "https://github.com/DVSAWR/taiga-metrics-extension"
     session_days: int = 14
+    superusers: str = ""
 
     sync_interval_seconds: int = 3600
     sync_overlap_minutes: int = 120

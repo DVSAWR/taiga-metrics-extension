@@ -41,3 +41,7 @@ export const ITEM_TYPE_FILTERS: { value: ItemType | null; label: string }[] = [
   { value: "issue", label: "Issues" },
   { value: "epic", label: "Epics" },
 ];
+
+export function firstTime(passes: number, clean: number): string {
+  return passes > 0 ? `${Math.round((clean / passes) * 100)}%` : "-";
+}

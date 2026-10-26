@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 
 import {
   ALL_TIME,
@@ -12,20 +12,22 @@ import {
   type ProjectSummary,
   type TransitionRow,
 } from "../api";
-import { formatDuration } from "../charts/format";
+import { fillWidth, formatDuration } from "../charts/format";
 import { StatTile } from "../charts/StatTile";
 import { CardRef } from "../components/CardRef";
 import { PersonLink, PersonRef } from "../components/PersonLink";
 import { UserPhoto } from "../components/UserPhoto";
 import { StatusName } from "../components/StatusName";
 import { StayBadge } from "../components/StayBadge";
+import { MetricPopup } from "../components/MetricPopup";
+import { SortTitle, sortRows, useSort } from "../components/SortTitle";
 import { TextLink } from "../components/TextLink";
 import { CARD_BACKGROUND, FALLBACK_MARK, readable } from "../colors";
 import { EMPTY_SELECTION, usePeriod } from "../filterState";
 import { formatDateTime, formatNumber } from "../format";
 import { MODULE_INFO } from "../modules";
-import { modulePath } from "../router";
-import { Empty, MetricCard } from "./FlowMetrics";
+import { cardsPath, columnPath, projectPath } from "../router";
+import { DonutSplit, Empty, MetricCard, type Slice } from "./FlowMetrics";
 import { TransitionsTable } from "./HistoryTab";
 import { NotFoundPage } from "./HomePage";
 
@@ -54,8 +56,56 @@ function Status({
   );
 }
 
+function StaysList({ card, stays }: { card: CardFlow; stays: CardFlow["report"]["stays"] }) {
+  const [sort, onSort] = useSort();
+  return (
+    <table className="table table-compact move-events">
+      <thead>
+        <tr>
+          <th>
+            <SortTitle label="Entered" sortKey="entered" sort={sort} onSort={onSort} />
+          </th>
+          <th className="num">
+            <SortTitle label="Stayed" sortKey="stayed" sort={sort} onSort={onSort} />
+          </th>
+          <th>
+            <SortTitle label="Compared" sortKey="level" sort={sort} onSort={onSort} />
+          </th>
+          <th>
+            <SortTitle label="Moved on by" sortKey="person" sort={sort} onSort={onSort} />
+          </th>
+        </tr>
+      </thead>
+      <tbody>
+        {sortRows(stays, sort, (stay, key) =>
+          key === "entered"
+            ? stay.start
+            : key === "stayed"
+              ? stay.days
+              : key === "level"
+                ? stay.level
+                : stay.exited_by,
+        ).map((stay) => (
+          <tr key={stay.start}>
+            <td className="nowrap">{formatDateTime(stay.start)}</td>
+            <td className="num nowrap">
+              {formatDuration(stay.days)}
+              {stay.end === null && <span className="muted-inline"> so far</span>}
+            </td>
+            <td className="nowrap">
+              <StayBadge level={stay.level} />
+            </td>
+            <td className="truncate">
+              <PersonRef directory={card} id={stay.exited_by} nobody="-" />
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
 function TimeInStatuses({ slug, card }: { slug: string; card: CardFlow }) {
-  const [open, setOpen] = useState<number | null>(null);
   const columns = new Map(card.columns.map((column) => [column.status_id, column]));
   const order = new Map(card.columns.map((column, index) => [column.status_id, index]));
   const totals = [...card.report.columns].sort(
@@ -64,6 +114,22 @@ function TimeInStatuses({ slug, card }: { slug: string; card: CardFlow }) {
   const longest = Math.max(0, ...totals.map((total) => total.days));
   const days = totals.reduce((sum, total) => sum + total.days, 0);
   const visits = totals.reduce((sum, total) => sum + total.visits, 0);
+  const visitSlices: Slice[] = totals
+    .filter((total) => total.visits > 0)
+    .map((total) => {
+      const column = columns.get(total.status_id);
+      return {
+        key: String(total.status_id),
+        label: null,
+        name: column?.name ?? `Status ${total.status_id}`,
+        to:
+          column && !column.is_deleted
+            ? columnPath(slug, card.item_type, total.status_id)
+            : undefined,
+        color: readable(column?.color || NEUTRAL, CARD_BACKGROUND, FALLBACK_MARK),
+        count: total.visits,
+      };
+    });
   if (totals.length === 0) {
     return <Empty>No status history stored for this card.</Empty>;
   }
@@ -94,73 +160,38 @@ function TimeInStatuses({ slug, card }: { slug: string; card: CardFlow }) {
         {totals.map((total) => {
           const column = columns.get(total.status_id);
           const color = readable(column?.color || NEUTRAL, CARD_BACKGROUND, FALLBACK_MARK);
-          const isOpen = open === total.status_id;
           const stays = card.report.stays.filter((stay) => stay.status_id === total.status_id);
           return (
-            <Fragment key={total.status_id}>
-              <tr>
-                <td>
-                  <Status slug={slug} card={card} column={column} id={total.status_id} />
-                  {column?.is_deleted && <span className="badge badge-accent">Removed</span>}
-                </td>
-                <td>{column?.type && <span className="badge badge-muted">{column.type}</span>}</td>
-                <td className="bar-cell">
-                  <span className="inline-track">
-                    <span
-                      className="inline-bar"
-                      style={{
-                        width: `${longest > 0 ? (total.days / longest) * 100 : 0}%`,
-                        background: color,
-                      }}
-                    />
-                  </span>
-                  <span className="bar-share">
-                    {days > 0 ? `${Math.round((total.days / days) * 100)}%` : ""}
-                  </span>
-                </td>
-                <td
-                  className={`num matrix-cell${isOpen ? " open" : ""}`}
-                  title="Click for each stay"
-                  onClick={() => setOpen(isOpen ? null : total.status_id)}
+            <tr key={total.status_id}>
+              <td>
+                <Status slug={slug} card={card} column={column} id={total.status_id} />
+                {column?.is_deleted && <span className="badge badge-accent">Removed</span>}
+              </td>
+              <td>{column?.type && <span className="badge badge-muted">{column.type}</span>}</td>
+              <td className="bar-cell">
+                <span className="inline-track">
+                  <span
+                    className="inline-bar"
+                    style={{
+                      ...fillWidth(longest > 0 ? (total.days / longest) * 100 : 0),
+                      background: color,
+                    }}
+                  />
+                </span>
+                <span className="bar-share">
+                  {days > 0 ? `${Math.round((total.days / days) * 100)}%` : ""}
+                </span>
+              </td>
+              <td className="num">
+                <MetricPopup
+                  label="Show each stay"
+                  content={<StaysList card={card} stays={stays} />}
                 >
-                  <span className="matrix-number">{formatNumber(total.visits)}</span>
-                </td>
-                <td className="num nowrap">{formatDuration(total.days)}</td>
-              </tr>
-              {isOpen && (
-                <tr className="history-row">
-                  <td colSpan={5} className="matrix-panel-cell">
-                    <table className="table table-compact move-events">
-                      <thead>
-                        <tr>
-                          <th>Entered</th>
-                          <th className="num">Stayed</th>
-                          <th aria-label="Compared with past stays" />
-                          <th>Moved on by</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {stays.map((stay) => (
-                          <tr key={stay.start}>
-                            <td className="nowrap">{formatDateTime(stay.start)}</td>
-                            <td className="num nowrap">
-                              {formatDuration(stay.days)}
-                              {stay.end === null && <span className="muted-inline"> so far</span>}
-                            </td>
-                            <td className="nowrap">
-                              <StayBadge level={stay.level} />
-                            </td>
-                            <td className="truncate">
-                              <PersonRef directory={card} id={stay.exited_by} nobody="-" />
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </td>
-                </tr>
-              )}
-            </Fragment>
+                  {formatNumber(total.visits)}
+                </MetricPopup>
+              </td>
+              <td className="num nowrap">{formatDuration(total.days)}</td>
+            </tr>
           );
         })}
       </tbody>
@@ -169,7 +200,19 @@ function TimeInStatuses({ slug, card }: { slug: string; card: CardFlow }) {
           <th scope="row" colSpan={3}>
             Total
           </th>
-          <td className="num">{formatNumber(visits)}</td>
+          <td className="num">
+            <MetricPopup
+              label="Show all stays"
+              content={
+                <>
+                  <DonutSplit slices={visitSlices} total={visits} caption="visits" />
+                  <StaysList card={card} stays={card.report.stays} />
+                </>
+              }
+            >
+              {formatNumber(visits)}
+            </MetricPopup>
+          </td>
           <td className="num nowrap">{formatDuration(days)}</td>
         </tr>
       </tfoot>
@@ -188,14 +231,7 @@ function CommentList({ comments }: { comments: CardComments }) {
           <div className="comment-main">
             <div className="comment-head">
               <span className="comment-author">
-                <PersonLink
-                  name={comment.author_name || "Unknown"}
-                  username={
-                    comment.author_id === null
-                      ? null
-                      : comments.usernames[String(comment.author_id)] ?? null
-                  }
-                />
+                <PersonLink name={comment.author_name || "Unknown"} id={comment.author_id} />
               </span>
               <span className="comment-date">{formatDateTime(comment.created_at)}</span>
               {comment.edited_at && (
@@ -280,7 +316,8 @@ export function CardPage({
   return (
     <>
       <div className="breadcrumb">
-        <TextLink to={modulePath(slug, module)}>{info.label}</TextLink>
+        <TextLink to={projectPath(slug)}>Overview</TextLink> ·{" "}
+        <TextLink to={cardsPath(slug)}>Cards</TextLink> · {info.label}
       </div>
       <h1 className="card-title">
         {card ? (

@@ -25,7 +25,6 @@ PeriodKind = Literal["day", "week", "month", "sprint"]
 GROUP_OF: Final[dict[str | None, str]] = {
     "queue": "waiting",
     "work": "work",
-    "rework": "work",
     "done": "done",
     "cancelled": "done",
 }

@@ -11,28 +11,49 @@ import {
 import { CardTitle } from "../components/CardTitle";
 import { PersonLink, PersonList } from "../components/PersonLink";
 import { TextLink } from "../components/TextLink";
+import { StatusName } from "../components/StatusName";
+import { SortTitle, sortRows, useSort } from "../components/SortTitle";
 import { formatDateTime, ITEM_TYPE_FILTERS, ITEM_TYPE_LABELS } from "../format";
-import { FilterButton, FilterPanel } from "../components/FilterPanel";
-import { useFilterSelection, useFiltersOpen } from "../filterState";
+import { FilterPanel } from "../components/FilterPanel";
+import { useFilterSelection } from "../filterState";
 import { Icon } from "../icons";
 import { columnPath } from "../router";
+import { CardsTabs } from "./CardsPage";
 import { NotFoundPage } from "./HomePage";
 
 const SEARCH_DELAY_MS = 300;
 
-export function describeEvent(event: CardEvent) {
+export function describeEvent(event: CardEvent, slug: string, itemType: ItemType) {
+  const from = (
+    <StatusName
+      slug={slug}
+      itemType={itemType}
+      id={event.from_status_id}
+      name={event.from_status}
+      color={event.from_color}
+    />
+  );
+  const to = (
+    <StatusName
+      slug={slug}
+      itemType={itemType}
+      id={event.to_status_id}
+      name={event.to_status}
+      color={event.to_color}
+    />
+  );
   switch (event.kind) {
     case "create":
       return (
         <>
-          <span className="move-kind">Created in</span> {event.to_status ?? "-"}
+          <span className="move-kind">Created in</span> {to}
         </>
       );
     case "delete":
       return (
         <>
           <span className="deleted-status">Deleted</span> <span className="move-kind">from</span>{" "}
-          {event.from_status ?? "-"}
+          {from}
         </>
       );
     case "assign":
@@ -44,9 +65,11 @@ export function describeEvent(event: CardEvent) {
       );
     case "move":
       return (
-        <>
-          {event.from_status ?? "-"} <span className="move-arrow">→</span> {event.to_status ?? "-"}
-        </>
+        <span className="move-line">
+          {from}
+          <span className="move-arrow">→</span>
+          {to}
+        </span>
       );
   }
 }
@@ -57,12 +80,13 @@ function fromLink(event: MouseEvent<HTMLElement>): boolean {
 
 export function EventUser({ event }: { event: CardEvent }) {
   if (event.user) {
-    return <PersonLink name={event.user.name} username={event.user.username} />;
+    return <PersonLink name={event.user.name} id={event.user.id} />;
   }
   return <>{event.user_name || "-"}</>;
 }
 
 function CardHistory({ slug, card }: { slug: string; card: CardRow }) {
+  const [sort, onSort] = useSort();
   const [events, setEvents] = useState<CardEvent[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -84,17 +108,30 @@ function CardHistory({ slug, card }: { slug: string; card: CardRow }) {
     return <p className="muted">No history stored for this card.</p>;
   }
   return (
-    <ol className="history">
-      {events.map((event) => (
-        <li key={`${event.history_id}-${event.kind}`}>
-          <span className="history-time">{formatDateTime(event.happened_at)}</span>
-          <span className="history-text">{describeEvent(event)}</span>
-          <span className="history-user">
-            <EventUser event={event} />
-          </span>
-        </li>
-      ))}
-    </ol>
+    <>
+      <div className="history-sort">
+        <SortTitle label="When" sortKey="when" sort={sort} onSort={onSort} />
+        <SortTitle label="Change" sortKey="change" sort={sort} onSort={onSort} />
+        <SortTitle label="By" sortKey="person" sort={sort} onSort={onSort} />
+      </div>
+      <ol className="history">
+        {sortRows(events, sort, (event, key) =>
+          key === "when"
+            ? event.happened_at
+            : key === "change"
+              ? `${event.kind} ${event.from_status ?? ""} ${event.to_status ?? ""}`
+              : event.user?.name ?? event.user_name,
+        ).map((event) => (
+          <li key={`${event.history_id}-${event.kind}`}>
+            <span className="history-time">{formatDateTime(event.happened_at)}</span>
+            <span className="history-text">{describeEvent(event, slug, card.item_type)}</span>
+            <span className="history-user">
+              <EventUser event={event} />
+            </span>
+          </li>
+        ))}
+      </ol>
+    </>
   );
 }
 
@@ -111,7 +148,6 @@ export function SearchPage({
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<ItemType | null>(null);
   const [selection, setSelection] = useFilterSelection(slug);
-  const [filtersOpen, setFiltersOpen] = useFiltersOpen();
   const [cards, setCards] = useState<CardRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
@@ -144,13 +180,8 @@ export function SearchPage({
 
   return (
     <>
-      <h1>Search</h1>
+      <CardsTabs slug={slug} tab="search" />
       <div className="search-bar toolbar">
-        <FilterButton
-          open={filtersOpen}
-          selection={selection}
-          onToggle={() => setFiltersOpen(!filtersOpen)}
-        />
         <label className="search-input">
           <Icon name="search" />
           <input
@@ -177,14 +208,14 @@ export function SearchPage({
       </div>
 
       <div className="with-filters">
-        {filtersOpen && (
+        {
           <FilterPanel
             slug={slug}
             itemType={filter}
             selection={selection}
             onChange={setSelection}
           />
-        )}
+        }
         <div className="filtered-content">
           {error && <div className="banner banner-fail">{error}</div>}
           {cards && cards.length === 0 && <p className="muted">No cards match.</p>}

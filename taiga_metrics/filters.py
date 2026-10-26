@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Final, Literal
 
 if TYPE_CHECKING:
@@ -174,16 +174,36 @@ class AssignmentFilter:
     """Which assignee sets count, from the people and roles the selection includes.
 
     Included people and included roles each have to be satisfied by the assignees of
-    the moment; ``none`` stands for nobody assigned, or nobody with a role.
+    the moment; ``none`` stands for nobody assigned, or nobody with a role. ``negated``
+    turns the filter into everyone else: the moments and events the filter does not
+    take, so that the two together are the whole flow.
     """
 
     people: frozenset[int] | None = None
     unassigned: bool = False
     roles: frozenset[int] | None = None
     no_role: bool = False
+    negated: bool = False
+
+    def rest(self) -> AssignmentFilter:
+        """Everyone else: what this filter leaves out."""
+        return replace(self, negated=not self.negated)
+
+    def takes(self, assignees: frozenset[int], roles_of: Mapping[int, int | None]) -> bool:
+        """Whether a moment with these assignees belongs to the filter, negation applied."""
+        return self.matches(assignees, roles_of) != self.negated
+
+    def takes_event(
+        self, before: frozenset[int], after: frozenset[int], roles_of: Mapping[int, int | None]
+    ) -> bool:
+        """Whether an event belongs to the filter: its people were assigned right before
+        or right after it; negated, neither was the case.
+        """
+        hit = self.matches(before, roles_of) or self.matches(after, roles_of)
+        return hit != self.negated
 
     def matches(self, assignees: frozenset[int], roles_of: Mapping[int, int | None]) -> bool:
-        """Whether the given assignees satisfy the filter."""
+        """Whether the given assignees satisfy the filter, negation left aside."""
         if self.people is not None and not (
             assignees & self.people or (self.unassigned and not assignees)
         ):
@@ -212,3 +232,39 @@ def assignment_filter(selection: Selection) -> AssignmentFilter | None:
         roles=ids_of(roles.include) if roles and roles.include else None,
         no_role=bool(roles and NONE in roles.include),
     )
+
+
+def card_part(selection: Selection) -> Selection:
+    """The selection without its included people and roles: what it asks of the cards.
+
+    Excluded people and roles stay, since they drop whole cards.
+    """
+    kept = {
+        category: (
+            CategorySelection(frozenset(), values.exclude)
+            if category in ("assigned", "role")
+            else values
+        )
+        for category, values in selection.categories.items()
+    }
+    return Selection(
+        {category: values for category, values in kept.items() if values.include or values.exclude}
+    )
+
+
+def selection_include(selection: Selection) -> list[str]:
+    """The included values as ``category:value`` strings."""
+    return [
+        f"{category}:{value}"
+        for category, values in selection.categories.items()
+        for value in sorted(values.include)
+    ]
+
+
+def selection_exclude(selection: Selection) -> list[str]:
+    """The excluded values as ``category:value`` strings."""
+    return [
+        f"{category}:{value}"
+        for category, values in selection.categories.items()
+        for value in sorted(values.exclude)
+    ]

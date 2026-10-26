@@ -66,16 +66,25 @@ export type Route =
   | { page: "project"; slug: string }
   | { page: "module"; slug: string; module: Module; tab: FlowTab }
   | { page: "card"; slug: string; module: Module; itemId: number }
-  | { page: "kanban"; slug: string; itemType: ItemType | null }
-  | { page: "scrum"; slug: string; itemType: ItemType | null }
   | { page: "column"; slug: string; itemType: ItemType; statusId: number }
-  | { page: "team"; slug: string }
-  | { page: "search"; slug: string }
+  | { page: "person"; slug: string; userId: number | null }
+  | { page: "people"; slug: string }
+  | { page: "roles"; slug: string; roleId: number | null }
+  | { page: "trends"; slug: string }
+  | { page: "activity"; slug: string }
+  | { page: "cards"; slug: string; tab: CardsTab }
   | { page: "project-settings"; slug: string; tab: ProjectSettingsTab }
   | { page: "not-found" };
 
-export type ProjectSection = "kanban" | "scrum" | "team" | "search" | "settings";
-export type ProjectSettingsTab = "access" | "general" | "calendar" | "status" | "sync";
+export type ProjectSection =
+  | "directions"
+  | "people"
+  | "trends"
+  | "activity"
+  | "cards"
+  | "settings";
+export type CardsTab = "search" | "history";
+export type ProjectSettingsTab = "access" | "general" | "status" | "sync";
 export type FlowTab = "overview" | "moves" | "history" | "kanban";
 
 const FLOW_TABS: FlowTab[] = ["overview", "moves", "history", "kanban"];
@@ -83,14 +92,18 @@ export const MODULES: Module[] = ["epics", "userstories", "tasks", "issues"];
 export const KANBAN_MODULES: Module[] = ["userstories", "tasks"];
 const ITEM_TYPES: ItemType[] = ["epic", "userstory", "task", "issue"];
 
-export function kanbanPath(slug: string, itemType: ItemType | null = null): string {
-  const base = projectPath(slug, "kanban");
-  return itemType ? `${base}/${itemType}` : base;
+export function cardsPath(slug: string, tab: CardsTab = "search"): string {
+  const base = projectPath(slug, "cards");
+  return tab === "search" ? base : `${base}/${tab}`;
 }
 
-export function scrumPath(slug: string, itemType: ItemType | null = null): string {
-  const base = projectPath(slug, "scrum");
-  return itemType ? `${base}/${itemType}` : base;
+export function peoplePath(slug: string): string {
+  return projectPath(slug, "people");
+}
+
+export function activityPath(slug: string, who: string | null = null): string {
+  const base = projectPath(slug, "activity");
+  return who ? `${base}?${new URLSearchParams({ who })}` : base;
 }
 
 export function columnPath(slug: string, itemType: ItemType, statusId: number): string {
@@ -99,6 +112,15 @@ export function columnPath(slug: string, itemType: ItemType, statusId: number): 
 
 export function cardPath(slug: string, module: Module, itemId: number): string {
   return `${projectPath(slug)}/${module}/card/${itemId}`;
+}
+
+export function personPath(slug: string, userId: number | null = null): string {
+  return `${projectPath(slug, "people")}/${userId === null ? "me" : userId}`;
+}
+
+export function rolePath(slug: string, roleId: number | null = null): string {
+  const base = projectPath(slug, "directions");
+  return roleId === null ? base : `${base}/${roleId}`;
 }
 
 export function modulePath(slug: string, module: Module, tab: FlowTab = "overview"): string {
@@ -120,11 +142,13 @@ export function routeSlug(route: Route): string | null {
   return route.page === "project" ||
     route.page === "module" ||
     route.page === "card" ||
-    route.page === "kanban" ||
-    route.page === "scrum" ||
     route.page === "column" ||
-    route.page === "team" ||
-    route.page === "search" ||
+    route.page === "person" ||
+    route.page === "people" ||
+    route.page === "roles" ||
+    route.page === "trends" ||
+    route.page === "activity" ||
+    route.page === "cards" ||
     route.page === "project-settings"
     ? route.slug
     : null;
@@ -140,22 +164,52 @@ export function matchRoute(path: string): Route {
     const slug = decodeURIComponent(parts[1]);
     const [section, sub, id] = [parts[2], parts[3], parts[4]];
     if (section === "scrum") {
-      const itemType = sub ? ITEM_TYPES.find((candidate) => candidate === sub) : null;
-      return itemType === undefined || id
-        ? { page: "not-found" }
-        : { page: "scrum", slug, itemType };
+      return { page: "project", slug };
     }
     if (section === "kanban") {
       const itemType = sub ? ITEM_TYPES.find((candidate) => candidate === sub) : null;
-      if (itemType === undefined) {
-        return { page: "not-found" };
+      if (id && itemType) {
+        return { page: "column", slug, itemType, statusId: Number(id) };
       }
-      if (id) {
-        return itemType
-          ? { page: "column", slug, itemType, statusId: Number(id) }
-          : { page: "not-found" };
+      return { page: "project", slug };
+    }
+    if (section === "board" && !sub) {
+      return { page: "project", slug };
+    }
+    if (section === "compare" && !sub) {
+      return { page: "roles", slug, roleId: null };
+    }
+    if ((section === "trends" || section === "activity") && !sub) {
+      return { page: section, slug };
+    }
+    if (section === "cards" && !id) {
+      return !sub || sub === "search" || sub === "history"
+        ? { page: "cards", slug, tab: sub === "history" ? "history" : "search" }
+        : { page: "not-found" };
+    }
+    if (section === "search" || section === "team") {
+      return section === "search"
+        ? { page: "cards", slug, tab: "search" }
+        : { page: "project", slug };
+    }
+    if (section === "roles" || section === "directions") {
+      if (!sub) {
+        return { page: "roles", slug, roleId: null };
       }
-      return { page: "kanban", slug, itemType };
+      return /^\d+$/.test(sub) && !id
+        ? { page: "roles", slug, roleId: Number(sub) }
+        : { page: "not-found" };
+    }
+    if (section === "people") {
+      if (!sub) {
+        return { page: "people", slug };
+      }
+      if (sub === "me" && !id) {
+        return { page: "person", slug, userId: null };
+      }
+      return /^\d+$/.test(sub) && !id
+        ? { page: "person", slug, userId: Number(sub) }
+        : { page: "not-found" };
     }
     if (id) {
       const module = MODULES.find((candidate) => candidate === section);
@@ -169,14 +223,14 @@ export function matchRoute(path: string): Route {
     if (!section) {
       return { page: "project", slug };
     }
-    if ((section === "team" || section === "search") && !sub) {
-      return { page: section, slug };
-    }
     if (section === "settings") {
       if (!sub) {
         return { page: "project-settings", slug, tab: "access" };
       }
-      if (sub === "general" || sub === "calendar" || sub === "status" || sub === "sync") {
+      if (sub === "calendar") {
+        return { page: "project-settings", slug, tab: "general" };
+      }
+      if (sub === "general" || sub === "status" || sub === "sync") {
         return { page: "project-settings", slug, tab: sub };
       }
       if (sub === "columns") {

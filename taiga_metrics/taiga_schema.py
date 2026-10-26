@@ -29,7 +29,6 @@ EXPECTED_SCHEMA: Mapping[str, frozenset[str]] = {
             "is_epics_activated",
             "is_issues_activated",
             "is_wiki_activated",
-            "archived_code",
             "blocked_code",
             "tags_colors",
             "logo",

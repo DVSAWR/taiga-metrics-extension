@@ -45,9 +45,11 @@ function edgeCount(point: TotalPoint, edge: "p25" | "p75"): string {
 
 export function TotalChart({
   points,
+  few,
   onPick,
 }: {
   points: TotalPoint[];
+  few: number;
   onPick: (index: number, part: TotalPart) => void;
 }) {
   const [active, setActive] = useState<number | null>(null);
@@ -63,9 +65,11 @@ export function TotalChart({
   const y = (value: number) => bottom - INSET - (value / top) * (MAIN - INSET);
   const every = Math.max(1, Math.ceil(MIN_LABEL_WIDTH / Math.max(1, band)));
   const known = points.flatMap((point, index) => (point.p50 === null ? [] : [index]));
-  const done = known.filter((index) => !points[index]?.current);
+  const reliable = (index: number) => (points[index]?.measured ?? 0) >= few;
+  const done = known.filter((index) => !points[index]?.current && reliable(index));
   const halves = done.slice(1).flatMap((index, at) => {
     const from = done[at] ?? index;
+    if (index !== from + 1) return [];
     const start = points[from];
     const end = points[index];
     if (!start || !end || start.p50 === null || end.p50 === null) {
@@ -89,22 +93,31 @@ export function TotalChart({
       { key: `lower-${from}`, points: quad("p25"), ...tone("p25", LOWER_OPACITY) },
     ];
   });
-  const segments = known.slice(1).map((index, at) => {
+  const segments = known.slice(1).flatMap((index, at) => {
     const from = known[at] ?? index;
+    if (index !== from + 1 || !reliable(index) || !reliable(from)) {
+      return [];
+    }
     const start = points[from]?.p50 ?? 0;
     const end = points[index]?.p50 ?? 0;
-    return {
-      key: `${from}-${index}`,
-      from,
-      to: index,
-      color: trendColor(start, end, false),
-      going: Boolean(points[index]?.current),
-    };
+    return [
+      {
+        key: `${from}-${index}`,
+        from,
+        to: index,
+        color: trendColor(start, end, false),
+        going: Boolean(points[index]?.current),
+      },
+    ];
   });
   const hovered = active === null ? null : points[active] ?? null;
 
   return (
-    <div className="line-chart" ref={container}>
+    <div
+      className="line-chart"
+      ref={container}
+      style={{ minWidth: points.length * 86 + PADDING.left + PADDING.right }}
+    >
       <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} role="img">
         {axis.map((value) => (
           <g key={value}>
@@ -128,6 +141,28 @@ export function TotalChart({
           top={PADDING.top}
           bottom={bottom}
         />
+        {points.map(
+          (point, index) =>
+            (point.p50 === null || point.measured < few) && (
+              <g key={`empty-${index}`}>
+                <rect
+                  className="total-no-data"
+                  x={x(index) - band / 2 + 1}
+                  y={PADDING.top}
+                  width={Math.max(0, band - 2)}
+                  height={MAIN}
+                />
+                <text
+                  className="total-no-data-label"
+                  x={x(index)}
+                  y={bottom - 12}
+                  textAnchor="middle"
+                >
+                  {point.p50 === null ? "no data" : "few cards"}
+                </text>
+              </g>
+            ),
+        )}
         {points.map((point, index) =>
           index % every === 0 ? (
             <g key={`label-${index}`}>
@@ -139,12 +174,17 @@ export function TotalChart({
                 y2={bottom + 6}
               />
               <text
-                className="chart-tick"
+                className={
+                  point.p50 === null || point.measured < few
+                    ? "chart-tick total-empty-tick"
+                    : "chart-tick"
+                }
                 x={x(index)}
                 y={height - PADDING.bottom + 18}
                 textAnchor="middle"
               >
-                {point.label}
+                {point.label.length > 13 ? `${point.label.slice(0, 12)}…` : point.label}
+                <title>{point.label}</title>
               </text>
             </g>
           ) : null,
@@ -182,7 +222,9 @@ export function TotalChart({
           return point && point.p50 !== null ? (
             <g key={index}>
               <circle
-                className={point.current ? "total-point going" : "total-point"}
+                className={`total-point${point.current ? " going" : ""}${
+                  !reliable(index) ? " weak" : ""
+                }`}
                 cx={x(index)}
                 cy={y(point.p50)}
                 r={4.5}
@@ -288,9 +330,14 @@ export function TotalChart({
             {hovered.current ? ", going" : ""}
           </strong>
           {hovered.p50 === null ? (
-            <span>No card finished</span>
+            <span>{hovered.cards > 0 ? "No time measurement available" : "No card finished"}</span>
           ) : (
             <>
+              {hovered.measured < few && (
+                <span>
+                  Too few cards to compare reliably ({hovered.measured} of {few})
+                </span>
+              )}
               <span>Median {formatAdaptive(hovered.p50)}</span>
               <span>
                 Middle half {formatAdaptive(hovered.p25)} to {formatAdaptive(hovered.p75)}

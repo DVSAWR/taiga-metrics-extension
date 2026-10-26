@@ -207,12 +207,13 @@ column_type = sa.Table(
     sa.Column("updated_by", sa.Integer),
 )
 
-item_type_display = sa.Table(
-    "item_type_display",
+column_role = sa.Table(
+    "column_role",
     metadata,
     sa.Column("project_id", sa.Integer, primary_key=True),
     sa.Column("item_type", sa.Text, primary_key=True),
-    sa.Column("show_removed", sa.Boolean),
+    sa.Column("status_id", sa.Integer, primary_key=True),
+    sa.Column("role_id", sa.Integer, primary_key=True),
     sa.Column("updated_at", TIMESTAMP),
     sa.Column("updated_by", sa.Integer),
 )
@@ -223,6 +224,52 @@ project_calendar = sa.Table(
     sa.Column("project_id", sa.Integer, primary_key=True),
     sa.Column("timezone", sa.Text),
     sa.Column("working_days", postgresql.ARRAY(sa.Integer)),
+    sa.Column("updated_at", TIMESTAMP),
+    sa.Column("updated_by", sa.Integer),
+)
+
+return_rules = sa.Table(
+    "return_rules",
+    metadata,
+    sa.Column("project_id", sa.Integer, primary_key=True),
+    sa.Column("item_type", sa.Text, primary_key=True),
+    sa.Column("earlier", sa.Boolean),
+    sa.Column("out_of_done", sa.Boolean),
+    sa.Column("misclick_minutes", sa.Integer),
+    sa.Column("credit", sa.Text),
+    sa.Column("updated_at", TIMESTAMP),
+    sa.Column("updated_by", sa.Integer),
+)
+
+column_return = sa.Table(
+    "column_return",
+    metadata,
+    sa.Column("project_id", sa.Integer, primary_key=True),
+    sa.Column("item_type", sa.Text, primary_key=True),
+    sa.Column("status_id", sa.Integer, primary_key=True),
+    sa.Column("mode", sa.Text),
+    sa.Column("updated_at", TIMESTAMP),
+    sa.Column("updated_by", sa.Integer),
+)
+
+return_pair = sa.Table(
+    "return_pair",
+    metadata,
+    sa.Column("project_id", sa.Integer, primary_key=True),
+    sa.Column("item_type", sa.Text, primary_key=True),
+    sa.Column("from_status", sa.Integer, primary_key=True),
+    sa.Column("to_status", sa.Integer, primary_key=True),
+    sa.Column("is_return", sa.Boolean),
+    sa.Column("updated_at", TIMESTAMP),
+    sa.Column("updated_by", sa.Integer),
+)
+
+reporting_cadence = sa.Table(
+    "reporting_cadence",
+    metadata,
+    sa.Column("project_id", sa.Integer, primary_key=True),
+    sa.Column("weeks", sa.Integer),
+    sa.Column("start", sa.Date),
     sa.Column("updated_at", TIMESTAMP),
     sa.Column("updated_by", sa.Integer),
 )

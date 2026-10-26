@@ -9,13 +9,13 @@ from taiga_metrics.api.app import Services
 from taiga_metrics.auth.access import Viewer
 from taiga_metrics.auth.taiga_client import TaigaUnavailableError
 from taiga_metrics.comments import CardComments
+from taiga_metrics.directions import DirectionFlow, DirectionRef
 from taiga_metrics.explore import (
     CardEvent,
     CardRow,
     FilterCategory,
     FilterPanel,
     FilterValue,
-    Member,
     Person,
     ProjectRef,
     RoleRef,
@@ -51,19 +51,33 @@ from taiga_metrics.metrics.loader import (
     PeriodRef,
     PeriodStatusTimes,
     PeriodStays,
+    PersonSummary,
     StatusNow,
     StayRow,
     TransitionPage,
     TransitionRow,
+)
+from taiga_metrics.metrics.share import PersonShare
+from taiga_metrics.people import (
+    ActivityDay,
+    ActivityEvent,
+    PersonActivity,
+    PersonProfile,
+    TeamActivity,
+    TeamActivityDay,
+    TeamEvent,
+    TeamEvents,
 )
 from taiga_metrics.project_settings import (
     CalendarSettings,
     ColumnInfo,
     ItemTypeColumns,
     MemberCalendar,
+    ReturnSettings,
     normalize_days,
 )
 from taiga_metrics.projects import ProjectSummary
+from taiga_metrics.reporting import Cadence
 from taiga_metrics.sync.queries import ProjectSyncSummary, SyncSummary
 from taiga_metrics.team import EXTENSION_METRICS, TAIGA_METRICS, TeamStats
 
@@ -75,7 +89,8 @@ if TYPE_CHECKING:
     from taiga_metrics.explore import CardKey
     from taiga_metrics.filters import AssignmentFilter, Selection
     from taiga_metrics.metrics.periods import PeriodKind
-    from taiga_metrics.project_settings import ColumnType
+    from taiga_metrics.metrics.returns import ColumnMode
+    from taiga_metrics.project_settings import ColumnType, ReturnPair
     from taiga_metrics.sync.queries import SyncRun
 
 REPORT = HealthReport(
@@ -138,11 +153,18 @@ class FakeHealth:
 
 
 class FakeProjects:
-    """Returns ``PROJECTS``."""
+    """Returns ``PROJECTS``, all with Scrum on except those in ``scrum_off``."""
+
+    def __init__(self) -> None:
+        """Scrum on everywhere."""
+        self.scrum_off: set[int] = set()
 
     async def list_projects(self) -> list[ProjectSummary]:
         """Return ``PROJECTS``."""
-        return PROJECTS
+        return [
+            project.model_copy(update={"has_scrum": project.id not in self.scrum_off})
+            for project in PROJECTS
+        ]
 
 
 class FakeSyncData:
@@ -187,18 +209,6 @@ class FakeTrigger:
         self.starts += 1
         return self.starts == 1
 
-
-MEMBERS = [
-    Member(
-        user_id=5,
-        username="qwer",
-        full_name="",
-        role="Product Owner",
-        is_owner=True,
-        is_admin=True,
-        is_active=True,
-    )
-]
 
 CARDS = [
     CardRow(
@@ -281,10 +291,6 @@ class FakeProjectData:
                 closed=False,
             )
         ]
-
-    async def members(self, slug: str) -> list[Member] | None:
-        """``MEMBERS`` for ``alpha``."""
-        return MEMBERS if slug == "alpha" else None
 
     async def search(
         self,
@@ -461,10 +467,14 @@ class FakeProjectSettings:
     def __init__(self) -> None:
         """Two user story columns, nothing configured, default calendar."""
         self.types: dict[tuple[str, int], ColumnType] = {}
-        self.show_removed: dict[str, bool] = {}
         self.timezone = "UTC"
         self.days = [1, 2, 3, 4, 5]
         self.member_days: dict[int, list[int]] = {}
+        self.roles: dict[tuple[str, int], list[int]] = {}
+        self.cadence = Cadence()
+        self.returns: dict[str, ReturnSettings] = {}
+        self.modes: dict[tuple[str, int], ColumnMode] = {}
+        self.pairs: dict[str, list[ReturnPair]] = {}
 
     async def columns(self, project_id: int) -> list[ItemTypeColumns]:
         """``New`` and ``Done`` of user stories."""
@@ -482,21 +492,18 @@ class FakeProjectSettings:
                         is_deleted=False,
                         cards=1,
                         type=self.types.get(("userstory", status_id)),
+                        roles=self.roles.get(("userstory", status_id), []),
+                        return_mode=self.modes.get(("userstory", status_id), "normal"),
                     )
                     for status_id, name, position, closed in (
                         (1, "New", 1, False),
                         (2, "Done", 2, True),
                     )
                 ],
-                show_removed=self.show_removed.get("userstory", False),
+                returns=self.returns.get("userstory", ReturnSettings()),
+                return_pairs=self.pairs.get("userstory", []),
             )
         ]
-
-    async def set_show_removed(
-        self, project_id: int, item_type: str, show_removed: bool, by_user: int
-    ) -> None:
-        """Remember the choice per card type."""
-        self.show_removed[item_type] = show_removed
 
     async def set_column_type(
         self,
@@ -514,6 +521,44 @@ class FakeProjectSettings:
         else:
             self.types[(item_type, status_id)] = column_type
         return True
+
+    async def set_column_roles(
+        self, project_id: int, item_type: str, status_id: int, role_ids: list[int], by_user: int
+    ) -> bool:
+        """Only user story columns 1 and 2 exist; roles 30 and 40 are the project's."""
+        if item_type != "userstory" or status_id not in {1, 2}:
+            return False
+        self.roles[(item_type, status_id)] = sorted(set(role_ids) & {30, 40})
+        return True
+
+    async def set_return_settings(
+        self, project_id: int, item_type: str, settings: ReturnSettings, by_user: int
+    ) -> None:
+        """Remember the rules per card type."""
+        self.returns[item_type] = settings
+
+    async def set_column_return(
+        self, project_id: int, item_type: str, status_id: int, mode: ColumnMode, by_user: int
+    ) -> bool:
+        """Only user story columns 1 and 2 exist."""
+        if item_type != "userstory" or status_id not in {1, 2}:
+            return False
+        self.modes[(item_type, status_id)] = mode
+        return True
+
+    async def set_return_pairs(
+        self, project_id: int, item_type: str, pairs: list[ReturnPair], by_user: int
+    ) -> None:
+        """Remember the marked moves per card type."""
+        self.pairs[item_type] = pairs
+
+    async def cadences(self, project_ids: Iterable[int]) -> dict[int, Cadence]:
+        """The same cadence for every project."""
+        return dict.fromkeys(project_ids, self.cadence)
+
+    async def set_cadence(self, project_id: int, cadence: Cadence, by_user: int) -> None:
+        """Remember the cadence."""
+        self.cadence = cadence
 
     async def calendar(self, project_id: int) -> CalendarSettings:
         """The stored calendar with member 6."""
@@ -720,6 +765,103 @@ class FakeFlowData:
             people={5: "qwer"},
         )
 
+    async def directions(self, project_id: int) -> list[DirectionRef]:
+        """Back (40) answers for user story column 1; its member is 6."""
+        return [DirectionRef(role_id=40, name="Back", columns={"userstory": [1]}, members=[6])]
+
+    async def direction(
+        self,
+        project_id: int,
+        item_type: str,
+        *,
+        statuses: Collection[int],
+        members: Collection[int],
+        period: Period,
+        item_ids: Collection[int] | None = None,
+    ) -> DirectionFlow:
+        """An empty direction, recording what was asked."""
+        self.requests.append({"direction": sorted(statuses), "members": sorted(members)})
+        return DirectionFlow(
+            columns=[],
+            in_now=0,
+            stuck=[],
+            passed=0,
+            returned=[],
+            sent_back=[],
+            stays=0,
+            days=0,
+            people=[],
+            names={},
+        )
+
+    async def member_ids(self, project_id: int) -> list[int]:
+        """The owner and the member."""
+        return [5, 6]
+
+    async def people_summary(
+        self,
+        project_id: int,
+        item_type: str,
+        users: Collection[int],
+        *,
+        period: Period,
+        item_ids: Collection[int] | None = None,
+    ) -> list[PersonSummary]:
+        """Nothing done by anybody yet."""
+        return [
+            PersonSummary(
+                user_id=user,
+                name=f"#{user}",
+                username=None,
+                role_id=None,
+                in_progress=0,
+                stuck=0,
+                finished=0,
+                lead_p50=None,
+                cycle_p50=None,
+                passes=0,
+                clean_passes=0,
+                returns=0,
+            )
+            for user in users
+        ]
+
+    async def directions_flow(
+        self,
+        project_id: int,
+        item_type: str,
+        groups: Sequence[tuple[Collection[int], Collection[int]]],
+        *,
+        period: Period,
+        item_ids: Collection[int] | None = None,
+    ) -> list[DirectionFlow]:
+        """One empty direction per group."""
+        return [
+            await self.direction(
+                project_id,
+                item_type,
+                statuses=statuses,
+                members=members,
+                period=period,
+                item_ids=item_ids,
+            )
+            for statuses, members in groups
+        ]
+
+    async def person_share(
+        self,
+        project_id: int,
+        item_type: str,
+        user_id: int,
+        *,
+        period: Period,
+        item_ids: Collection[int] | None = None,
+        every: bool = False,
+    ) -> PersonShare:
+        """No columns, recording what was asked."""
+        self.requests.append({"share": user_id, "item_ids": item_ids})
+        return PersonShare(role_id=40, columns=[], roles={})
+
     async def card(
         self, project_id: int, item_type: str, item_id: int, *, working: bool = True
     ) -> CardFlow | None:
@@ -830,6 +972,119 @@ class FakeComments:
         return self.by_card.get((project_id, item_type, item_id), CardComments(comments=[]))
 
 
+class FakePeople:
+    """``alpha`` (5) is a member who moved one user story; anyone else is unknown."""
+
+    def __init__(self) -> None:
+        """Remember which cards each activity request was limited to."""
+        self.card_limits: list[object] = []
+        self.user_limits: list[object] = []
+
+    async def profile(self, project_id: int, user_id: int) -> PersonProfile | None:
+        """``alpha`` only."""
+        if user_id not in (5, 6):
+            return None
+        return PersonProfile(
+            id=user_id,
+            name="Alpha" if user_id == 5 else "Beta",
+            username="alpha" if user_id == 5 else "beta",
+            role="Back",
+            is_member=True,
+            is_owner=False,
+            is_admin=False,
+            is_active=True,
+            item_types=["userstory"],
+        )
+
+    async def activity(
+        self,
+        project_id: int,
+        user_id: int,
+        *,
+        since: datetime | None,
+        until: datetime | None,
+        timezone: str,
+        limit: int,
+        cards: object = None,
+    ) -> PersonActivity:
+        """One move of user story 1."""
+        self.card_limits.append(cards)
+        moved = datetime(2026, 9, 1, 10, tzinfo=UTC)
+        return PersonActivity(
+            events=[
+                ActivityEvent(
+                    id="h1",
+                    happened_at=moved,
+                    day=moved.date(),
+                    kind="move",
+                    item_type="userstory",
+                    item_id=1,
+                    from_status_id=1,
+                    to_status_id=2,
+                )
+            ],
+            days=[ActivityDay(day=moved.date(), counts={"move": 1})],
+            totals={"move": 1},
+            total=1,
+            truncated=False,
+        )
+
+    async def team_activity(
+        self,
+        project_id: int,
+        *,
+        since: datetime | None,
+        until: datetime | None,
+        timezone: str,
+        cards: object = None,
+        users: object = None,
+    ) -> TeamActivity:
+        """Two moves by ``alpha`` and one comment by the member on one day."""
+        self.card_limits.append(cards)
+        self.user_limits.append(users)
+        return TeamActivity(
+            days=[
+                TeamActivityDay(
+                    day=date(2026, 9, 1), counts={"move": 2, "comment": 1}, people={5: 2, 6: 1}
+                )
+            ],
+            totals={"move": 2, "comment": 1},
+            total=3,
+            people={5: "Alpha", 6: "Beta"},
+        )
+
+    async def team_events(
+        self,
+        project_id: int,
+        *,
+        since: datetime | None,
+        until: datetime | None,
+        timezone: str,
+        limit: int,
+        kind: str | None = None,
+        cards: object = None,
+        users: object = None,
+    ) -> TeamEvents:
+        """One move of user story 1 by ``alpha``, unless another kind is asked for."""
+        self.card_limits.append(cards)
+        self.user_limits.append(users)
+        moved = datetime(2026, 9, 1, 10, tzinfo=UTC)
+        events = [
+            TeamEvent(
+                id="h1",
+                happened_at=moved,
+                day=moved.date(),
+                kind="move",
+                item_type="userstory",
+                item_id=1,
+                user_id=5,
+                user_name="Alpha",
+            )
+        ]
+        shown = [event for event in events if kind in (None, event.kind)]
+        return TeamEvents(events=shown, total=len(shown), truncated=False)
+
+
 def fake_services() -> Services:
     """A full set of fakes."""
     return Services(
@@ -847,4 +1102,5 @@ def fake_services() -> Services:
         media=FakeMedia(),
         team=FakeTeam(),
         comments=FakeComments(),
+        people=FakePeople(),
     )

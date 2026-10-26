@@ -1,28 +1,26 @@
-import { useEffect, useRef, useState } from "react";
+import type { Me, ProjectSummary } from "../api";
+import { SidebarPopover } from "./SidebarPopover";
 
-import type { Module, ProjectSummary } from "../api";
+export const INDEPENDENT_NOTE =
+  "Taiga Metrics is an independent open-source project, not affiliated with or endorsed by Taiga or Kaleidos Inc.";
+
+export interface HelpLinks {
+  community: string;
+  repository: string;
+}
 import { settingsTabs } from "./SettingsTabs";
 import { Icon, type IconName } from "../icons";
-import { ProjectLogo } from "../projectLogo";
-import { canOpen, projectHome } from "../projectAccess";
-import { MODULE_INFO, MODULE_OF_TYPE } from "../modules";
-import { readStored, writeStored } from "../storage";
-import {
-  KANBAN_MODULES,
-  Link,
-  MODULES,
-  modulePath,
-  projectPath,
-  scrumPath,
-  usePath,
-  type Route,
-} from "../router";
+import { canOpen } from "../projectAccess";
+import { cardsPath, Link, peoplePath, personPath, projectPath, type Route } from "../router";
 
 interface SidebarProps {
   route: Route;
   project: ProjectSummary | null;
   collapsed: boolean;
   onToggle: () => void;
+  me: Me;
+  helpLinks: HelpLinks | null;
+  onLogout: () => void;
 }
 
 interface MenuItemProps {
@@ -57,201 +55,80 @@ function MenuItem({ to, icon, label, active }: MenuItemProps) {
   );
 }
 
-const GROUP_OPEN_KEY = "kanban-menu-open";
-
-function moduleActive(route: Route, module: Module): boolean {
-  return (
-    ((route.page === "module" || route.page === "card") && route.module === module) ||
-    (route.page === "column" && MODULE_OF_TYPE[route.itemType] === module)
-  );
-}
-
-function MenuGroup({
-  icon,
-  label,
-  items,
-}: {
-  icon: IconName;
-  label: string;
-  items: { key: string; to: string; label: string; active: boolean }[];
-}) {
-  const active = items.some((item) => item.active);
-  const [open, setOpen] = useState(() => readStored(GROUP_OPEN_KEY) !== "false");
-  const toggle = () => {
-    setOpen(!open);
-    writeStored(GROUP_OPEN_KEY, String(!open));
-  };
-  return (
-    <li className={`menu-option menu-group${active ? " active" : ""}${open ? " open" : ""}`}>
-      <button type="button" className="menu-group-button" title={label} onClick={toggle}>
-        <Icon name={icon} />
-        <span className="menu-option-text">{label}</span>
-        <Icon name="chevronDown" className="menu-group-chevron" />
-      </button>
-      {open && (
-        <ul className="child-menu">
-          {items.map((item) => (
-            <li key={item.key} className={`menu-option${item.active ? " active" : ""}`}>
-              <Link to={item.to} title={item.label}>
-                <span className="menu-option-text">{item.label}</span>
-              </Link>
-            </li>
-          ))}
-        </ul>
-      )}
-      <div className="menu-dialog menu-flyout">
-        <span className="menu-flyout-title">{label}</span>
-        {items.map((item) => (
-          <Link
-            key={item.key}
-            to={item.to}
-            className={`menu-flyout-link${item.active ? " active" : ""}`}
-          >
-            {item.label}
-          </Link>
-        ))}
-      </div>
-    </li>
-  );
-}
-
-function moduleItem(project: ProjectSummary, route: Route, module: Module) {
-  return (
-    <MenuItem
-      key={module}
-      to={modulePath(project.slug, module)}
-      icon={MODULE_INFO[module].icon}
-      label={MODULE_INFO[module].label}
-      active={moduleActive(route, module)}
-    />
-  );
-}
-
-function boardItems(project: ProjectSummary, route: Route) {
-  const shown = MODULES.filter((module) => project.modules.includes(module));
-  const onBoard = project.has_kanban
-    ? shown.filter((module) => KANBAN_MODULES.includes(module))
-    : [];
-  const loose = shown.filter(
-    (module) => KANBAN_MODULES.includes(module) && !onBoard.includes(module),
-  );
-  return [
-    ...shown
-      .filter((module) => module === "epics")
-      .map((module) => moduleItem(project, route, module)),
-    ...(project.has_scrum
-      ? [
-          <MenuItem
-            key="scrum"
-            to={scrumPath(project.slug)}
-            icon="moduleScrum"
-            label="Scrum"
-            active={route.page === "scrum"}
-          />,
-        ]
-      : []),
-    ...loose.map((module) => moduleItem(project, route, module)),
-    ...(onBoard.length > 0
-      ? [
-          <MenuGroup
-            key="kanban"
-            icon="moduleKanban"
-            label="Kanban"
-            items={onBoard.map((module) => ({
-              key: module,
-              to: modulePath(project.slug, module),
-              label: MODULE_INFO[module].label,
-              active: moduleActive(route, module),
-            }))}
-          />,
-        ]
-      : []),
-    ...(shown.includes("issues") ? [moduleItem(project, route, "issues")] : []),
-  ];
-}
-
-const NAVBAR_HEIGHT = 48;
-
-function useBottomAnchor() {
-  const inner = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    let frame = 0;
-    const place = () => {
-      frame = 0;
-      const shown = Math.max(0, NAVBAR_HEIGHT - window.scrollY);
-      inner.current?.style.setProperty("--navbar-shown", `${shown}px`);
-    };
-    const schedule = () => {
-      if (!frame) {
-        frame = window.requestAnimationFrame(place);
-      }
-    };
-    place();
-    window.addEventListener("scroll", schedule, { passive: true });
-    window.addEventListener("resize", schedule);
-    return () => {
-      window.removeEventListener("scroll", schedule);
-      window.removeEventListener("resize", schedule);
-      window.cancelAnimationFrame(frame);
-    };
-  }, []);
-  return inner;
-}
-
-export function Sidebar({ route, project, collapsed, onToggle }: SidebarProps) {
-  const path = usePath();
-  const inner = useBottomAnchor();
+export function Sidebar({
+  route,
+  project,
+  collapsed,
+  onToggle,
+  me,
+  helpLinks,
+  onLogout,
+}: SidebarProps) {
   const settingsTarget = settingsTabs(project)[0]?.to ?? null;
   return (
     <aside className={`project-navigation${collapsed ? " collapsed" : ""}`}>
-      <div className="nav-inner" ref={inner}>
-        <h1 className="sidebar-project">
-          {project ? (
-            <Link to={projectHome(project)} className="project-link" title={project.name}>
-              <ProjectLogo key={path} size={24} slug={project.slug} />
-              <span className="project-name">{project.name}</span>
-              <span className="menu-dialog menu-dialog-header" role="presentation">
-                {project.name}
-              </span>
-            </Link>
-          ) : (
-            <Link to="/" className="project-link project-link-empty" title="Select a project">
-              <ProjectLogo size={24} />
-              <span className="project-name">Select a project</span>
-              <span className="menu-dialog menu-dialog-header" role="presentation">
-                Select a project
-              </span>
-            </Link>
-          )}
-        </h1>
+      <div className="nav-inner">
         <ul className="main-menu">
-          {(!project || canOpen(project, "flow")) && (
+          {project && canOpen(project, "overview") && (
             <MenuItem
               to={project ? projectPath(project.slug) : null}
               icon="graph"
-              label="Flow metrics"
+              label="Overview"
               active={route.page === "project"}
             />
           )}
-          {project && canOpen(project, "flow") && boardItems(project, route)}
+          {project && canOpen(project, "directions") && (
+            <MenuItem
+              to={projectPath(project.slug, "directions")}
+              icon="briefcase"
+              label="Roles"
+              active={route.page === "roles"}
+            />
+          )}
+          {project && canOpen(project, "people") && (
+            <MenuItem
+              to={peoplePath(project.slug)}
+              icon="users"
+              label="People"
+              active={
+                route.page === "people" || (route.page === "person" && route.userId !== null)
+              }
+            />
+          )}
+          {project && canOpen(project, "my_page") && (
+            <MenuItem
+              to={personPath(project.slug)}
+              icon="user"
+              label="My page"
+              active={route.page === "person" && route.userId === null}
+            />
+          )}
+          {project && canOpen(project, "trends") && (
+            <MenuItem
+              to={project ? projectPath(project.slug, "trends") : null}
+              icon="trendingUp"
+              label="Trends"
+              active={route.page === "trends"}
+            />
+          )}
+          {project && canOpen(project, "activity") && (
+            <MenuItem
+              to={projectPath(project.slug, "activity")}
+              icon="activity"
+              label="Activity"
+              active={route.page === "activity"}
+            />
+          )}
+          {project && canOpen(project, "cards") && (
+            <MenuItem
+              to={project ? cardsPath(project.slug) : null}
+              icon="search"
+              label="Cards"
+              active={route.page === "cards" || route.page === "card"}
+            />
+          )}
         </ul>
         <ul className="main-menu menu-secondary">
-          {(!project || canOpen(project, "search")) && (
-            <MenuItem
-              to={project ? projectPath(project.slug, "search") : null}
-              icon="search"
-              label="Search"
-              active={route.page === "search"}
-            />
-          )}
-          {(!project || canOpen(project, "team")) && (
-            <MenuItem
-              to={project ? projectPath(project.slug, "team") : null}
-              icon="users"
-              label="Team"
-              active={route.page === "team"}
-            />
-          )}
           {settingsTarget && (
             <MenuItem
               to={settingsTarget}
@@ -260,6 +137,50 @@ export function Sidebar({ route, project, collapsed, onToggle }: SidebarProps) {
               active={route.page === "project-settings"}
             />
           )}
+          {helpLinks && (
+            <li className="menu-option">
+              <SidebarPopover
+                label="Help"
+                content={
+                  <div className="sidebar-popup-links">
+                    <a href={helpLinks.community} target="_blank" rel="noreferrer">
+                      Taiga Community
+                    </a>
+                    <a href={helpLinks.repository} target="_blank" rel="noreferrer">
+                      Taiga Metrics on GitHub
+                    </a>
+                    <p className="muted">{INDEPENDENT_NOTE}</p>
+                  </div>
+                }
+              >
+                <Icon name="helpCircle" />
+                <span className="menu-option-text">Help</span>
+              </SidebarPopover>
+            </li>
+          )}
+          <li className="menu-option disabled">
+            <span className="menu-option-link" title="Notifications: coming soon">
+              <Icon name="bell" />
+              <span className="menu-option-text">Notifications</span>
+            </span>
+          </li>
+          <li className="menu-option">
+            <SidebarPopover
+              label="Account"
+              content={
+                <div className="sidebar-popup-links">
+                  <strong>{me.full_name.trim() || me.username}</strong>
+                  <span className="muted">{me.email || `@${me.username}`}</span>
+                  <button type="button" onClick={onLogout}>
+                    Logout
+                  </button>
+                </div>
+              }
+            >
+              <Icon name="accountCircle" />
+              <span className="menu-option-text">{me.full_name.trim() || me.username}</span>
+            </SidebarPopover>
+          </li>
         </ul>
         <button
           type="button"

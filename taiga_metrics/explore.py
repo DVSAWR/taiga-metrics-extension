@@ -24,18 +24,6 @@ if TYPE_CHECKING:
 REF_PATTERN = re.compile(r"^#?(\d+)$")
 
 
-class Member(BaseModel):
-    """A member of a project with their role there."""
-
-    user_id: int
-    username: str
-    full_name: str
-    role: str
-    is_owner: bool
-    is_admin: bool
-    is_active: bool
-
-
 class Person(BaseModel):
     """A user as shown next to a card; ``username`` opens their Taiga profile."""
 
@@ -70,6 +58,10 @@ class CardEvent(BaseModel):
     kind: str
     from_status: str | None
     to_status: str | None
+    from_status_id: int | None = None
+    to_status_id: int | None = None
+    from_color: str | None = None
+    to_color: str | None = None
     assignees: list[Person] | None
     user: Person | None = None
 
@@ -156,10 +148,6 @@ class ProjectData(Protocol):
         """Roles of the project in Taiga's order, or ``None`` if the project is unknown."""
         ...
 
-    async def members(self, slug: str) -> list[Member] | None:
-        """Members of the project, or ``None`` if the project is unknown."""
-        ...
-
     async def search(
         self,
         slug: str,
@@ -226,19 +214,6 @@ def like_pattern(term: str) -> str:
 PROJECT_ID = text("select id from taiga_project where slug = :slug")
 
 PROJECT = text("select id, name from taiga_project where slug = :slug")
-
-MEMBERS = text(
-    """
-    select u.id as user_id, u.username, u.full_name, r.name as role,
-           p.owner_id = u.id as is_owner, m.is_admin, u.is_active
-      from taiga_membership m
-      join taiga_user u on u.id = m.user_id
-      join taiga_project p on p.id = m.project_id
-      left join taiga_role r on r.id = m.role_id
-     where m.project_id = :project_id
-     order by r.position nulls last, lower(coalesce(nullif(u.full_name, ''), u.username))
-    """
-)
 
 CARDS = text(
     """
@@ -365,14 +340,20 @@ CARD_EXISTS = text(
 
 CARD_EVENTS = text(
     """
-    select history_id, happened_at, user_name, user_id, kind, from_status_name as from_status,
-           to_status_name as to_status, null::integer[] as assignee_ids,
-           case kind when 'create' then 0 when 'delete' then 2 else 1 end as position
-      from transition
-     where item_type = :item_type and item_id = :item_id
+    select t.history_id, t.happened_at, t.user_name, t.user_id, t.kind,
+           t.from_status_name as from_status, t.to_status_name as to_status,
+           null::integer[] as assignee_ids,
+           case t.kind when 'create' then 0 when 'delete' then 2 else 1 end as position,
+           t.from_status_id, t.to_status_id, fs.color as from_color, ts.color as to_color
+      from transition t
+      left join taiga_status fs on fs.project_id = :project_id and fs.item_type = t.item_type
+        and fs.id = t.from_status_id
+      left join taiga_status ts on ts.project_id = :project_id and ts.item_type = t.item_type
+        and ts.id = t.to_status_id
+     where t.item_type = :item_type and t.item_id = :item_id
     union all
     select a.history_id, a.happened_at, a.user_name, a.user_id, 'assign', null, null,
-           a.assignee_ids, 1
+           a.assignee_ids, 1, null::integer, null::integer, null::text, null::text
       from assignment a
      where a.item_type = :item_type and a.item_id = :item_id
        and not (
@@ -454,20 +435,11 @@ def ordered_values(
 
 
 class StoredProjectData:
-    """Members and cards read from the extension's database."""
+    """Cards, filters, and project dictionaries read from the extension's database."""
 
     def __init__(self, engine: AsyncEngine) -> None:
         """Keep the engine of the extension's database."""
         self.engine = engine
-
-    async def members(self, slug: str) -> list[Member] | None:
-        """Members of the project ordered by role, then name."""
-        async with self.engine.connect() as connection:
-            project_id = await self.project_id(connection, slug)
-            if project_id is None:
-                return None
-            rows = await connection.execute(MEMBERS, {"project_id": project_id})
-            return [Member.model_validate(row._mapping) for row in rows]
 
     async def project(self, slug: str) -> ProjectRef | None:
         """The synced project with this slug."""
