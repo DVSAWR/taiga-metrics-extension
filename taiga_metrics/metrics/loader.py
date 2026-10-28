@@ -45,6 +45,7 @@ from taiga_metrics.metrics.periods import (
     spans_for,
     stats_of,
 )
+from taiga_metrics.metrics.quality import ReturnStats, return_stats
 from taiga_metrics.metrics.returns import ReturnRules
 from taiga_metrics.metrics.share import PersonShare, person_quality, person_share
 from taiga_metrics.project_settings import (
@@ -86,7 +87,7 @@ class FlowResponse(BaseModel):
     working_weekdays: list[int] = []
 
 
-class PersonSummary(BaseModel):
+class PersonSummary(ReturnStats):
     """One person's key numbers over a period: the time they were assigned."""
 
     user_id: int
@@ -100,7 +101,6 @@ class PersonSummary(BaseModel):
     cycle_p50: float | None
     passes: int
     clean_passes: int
-    returns: int
 
 
 class Period(BaseModel):
@@ -954,19 +954,20 @@ class StoredFlowData:
     ) -> tuple[FlowReport, Calendars]:
         """The flow report of one card type.
 
-        ``loaded`` are the columns and cards when the caller already has them. What is
+        ``loaded`` are all columns and cards when the caller already has them. What is
         stuck now is judged against every card's whole history, whatever the filters.
         """
         params = {"project_id": project_id, "item_type": item_type}
-        columns, cards = loaded or await self.cards(connection, params, item_ids)
+        columns, everything = loaded or await self.cards(connection, params)
+        allowed = None if item_ids is None else set(item_ids)
+        cards = (
+            everything
+            if allowed is None
+            else [card for card in everything if card.item_id in allowed]
+        )
         calendars = await self.calendars(connection, project_id)
         roles_of = await self.member_roles(connection, project_id) if people else {}
         rules, misclick = await self.return_options(connection, project_id, item_type)
-        everything = (
-            cards
-            if loaded is None and item_ids is None
-            else (await self.cards(connection, params))[1]
-        )
         usual = usual_stays(
             everything,
             calendars,
@@ -1106,13 +1107,19 @@ class StoredFlowData:
         """
         item_ids = None if keys is None else [key[1] for key in keys if key[0] == item_type]
         now = datetime.now(UTC)
-        loaded = await self.cards(
-            connection, {"project_id": project_id, "item_type": item_type}, item_ids
-        )
+        loaded = await self.cards(connection, {"project_id": project_id, "item_type": item_type})
         report, calendars = await self.report(
-            connection, project_id, item_type, now=now, period=period, people=people, loaded=loaded
+            connection,
+            project_id,
+            item_type,
+            now=now,
+            period=period,
+            item_ids=item_ids,
+            people=people,
+            loaded=loaded,
         )
-        cards = loaded[1]
+        allowed = None if item_ids is None else set(item_ids)
+        cards = [card for card in loaded[1] if allowed is None or card.item_id in allowed]
         rules, misclick = await self.return_options(connection, project_id, item_type)
         options = FlowOptions(
             now=now, since=None, working_days=period.working, misclick=misclick, returns=rules
@@ -1192,10 +1199,13 @@ class StoredFlowData:
                     now=now, since=None, working_days=working, misclick=misclick, returns=rules
                 ),
             )
-            usual, _ = await self.report(
-                connection, project_id, item_type, now=now, period=Period(working=working)
+            _, everything = await self.cards(connection, params)
+            usual = usual_stays(
+                everything,
+                calendars,
+                FlowOptions(now=now, since=None, working_days=working, misclick=misclick),
             )
-            report = replace(report, stays=with_levels(report.stays, usual.stay_times))
+            report = replace(report, stays=with_levels(report.stays, tuple(usual.values())))
             found = await self.people(
                 connection, {stay.exited_by for stay in report.stays if stay.exited_by is not None}
             )
@@ -1538,7 +1548,7 @@ class StoredFlowData:
         params = {"project_id": project_id, "item_type": item_type}
         now = datetime.now(UTC)
         async with self.engine.connect() as connection:
-            loaded = await self.cards(connection, params, item_ids)
+            loaded = await self.cards(connection, params)
             report, calendars = await self.report(
                 connection,
                 project_id,
@@ -1558,10 +1568,12 @@ class StoredFlowData:
                 misclick=misclick,
                 returns=rules,
             )
+            allowed = None if item_ids is None else set(item_ids)
+            cards = [card for card in loaded[1] if allowed is None or card.item_id in allowed]
             flows = [
                 direction_flow(
                     report,
-                    loaded[1],
+                    cards,
                     calendars,
                     options,
                     columns=loaded[0],
@@ -1628,6 +1640,12 @@ class StoredFlowData:
             found = await self.people(connection, set(users))
         summaries = []
         for user in users:
+            user_cards = [
+                card
+                for card in cards
+                if user in card.assignees
+                or any(user in assignees for _, assignees in card.assignments)
+            ]
             options = FlowOptions(
                 now=now,
                 since=period.since,
@@ -1639,8 +1657,8 @@ class StoredFlowData:
                 returns=rules,
                 misclick=misclick,
             )
-            report = compute_flow(cards, columns, calendars, options)
-            _, _, returns = person_quality(cards, columns, options, user)
+            report = compute_flow(user_cards, columns, calendars, options)
+            quality = person_quality(user_cards, columns, options, user)
             person = found.get(user)
             summaries.append(
                 PersonSummary(
@@ -1655,7 +1673,7 @@ class StoredFlowData:
                     cycle_p50=report.cycle_time.p50,
                     passes=sum(column.passes for column in report.columns),
                     clean_passes=sum(column.clean_passes for column in report.columns),
-                    returns=sum(returns.values()),
+                    **return_stats(event.item_id for event in quality.events).model_dump(),
                 )
             )
         return sorted(summaries, key=lambda summary: summary.name.lower())
@@ -1686,7 +1704,10 @@ class StoredFlowData:
             misclick=misclick,
             returns=rules,
         )
+        quality = person_quality(cards, columns, options, user_id)
         return PersonShare(
+            **return_stats(event.item_id for event in quality.events).model_dump(),
+            events=quality.events,
             role_id=role_id,
             columns=person_share(
                 cards,
@@ -1697,6 +1718,7 @@ class StoredFlowData:
                 role_id=role_id,
                 column_roles=column_roles,
                 every=every,
+                quality=quality,
             ),
             roles=roles,
         )

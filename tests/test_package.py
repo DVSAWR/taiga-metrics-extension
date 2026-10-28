@@ -7,4 +7,4 @@ import taiga_metrics
 
 def test_version_is_defined() -> None:
     """The package exposes its version string."""
-    assert taiga_metrics.__version__ == "0.2.0"
+    assert taiga_metrics.__version__ == "0.2.1"

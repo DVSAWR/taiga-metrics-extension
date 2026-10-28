@@ -17,12 +17,17 @@ from typing import TYPE_CHECKING, Literal, Protocol
 from pydantic import BaseModel
 from sqlalchemy import text
 
+from taiga_metrics.comments import history_key
 from taiga_metrics.metrics.engine import FlowOptions, card_returns, in_period
 from taiga_metrics.metrics.loader import StoredFlowData
 from taiga_metrics.sync.history import ITEM_TYPES
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
+
     from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+
+    from taiga_metrics.explore import CardKey
 
 Source = Literal["taiga", "extension"]
 Module = Literal["issues", "tasks", "wiki"]
@@ -141,7 +146,8 @@ COUNTS = {
         select i.assigned_to_id as user_id, count(*) as total
           from issues_issue i
           join projects_issuestatus s on s.id = i.status_id
-         where i.project_id = :project_id and s.is_closed and i.assigned_to_id is not null
+         where (not cast(:filtered as boolean) or i.id = any(cast(:issue_ids as integer[])))
+           and i.project_id = :project_id and s.is_closed and i.assigned_to_id is not null
            and (cast(:since as timestamptz) is null or i.finished_date >= :since) and (cast(:until as timestamptz) is null or i.finished_date < :until)
          group by 1
         """
@@ -150,7 +156,8 @@ COUNTS = {
         """
         select assigned_to_id as user_id, count(*) as total
           from tasks_task
-         where project_id = :project_id and is_iocaine and assigned_to_id is not null
+         where (not cast(:filtered as boolean) or id = any(cast(:task_ids as integer[])))
+           and project_id = :project_id and is_iocaine and assigned_to_id is not null
            and (cast(:since as timestamptz) is null or created_date >= :since) and (cast(:until as timestamptz) is null or created_date < :until)
          group by 1
         """
@@ -159,7 +166,7 @@ COUNTS = {
         """
         select cast(h."user"->>'pk' as integer) as user_id, count(*) as total
           from history_historyentry h
-         where h.key in (
+         where not cast(:filtered as boolean) and h.key in (
                select 'wiki.wikipage:' || w.id from wiki_wikipage w
                 where w.project_id = :project_id
            )
@@ -172,7 +179,8 @@ COUNTS = {
         """
         select owner_id as user_id, count(*) as total
           from issues_issue
-         where project_id = :project_id and owner_id is not null
+         where (not cast(:filtered as boolean) or id = any(cast(:issue_ids as integer[])))
+           and project_id = :project_id and owner_id is not null
            and (cast(:since as timestamptz) is null or created_date >= :since) and (cast(:until as timestamptz) is null or created_date < :until)
          group by 1
         """
@@ -182,7 +190,8 @@ COUNTS = {
         select t.assigned_to_id as user_id, count(*) as total
           from tasks_task t
           join projects_taskstatus s on s.id = t.status_id
-         where t.project_id = :project_id and s.is_closed and t.assigned_to_id is not null
+         where (not cast(:filtered as boolean) or t.id = any(cast(:task_ids as integer[])))
+           and t.project_id = :project_id and s.is_closed and t.assigned_to_id is not null
            and (cast(:since as timestamptz) is null or t.finished_date >= :since) and (cast(:until as timestamptz) is null or t.finished_date < :until)
          group by 1
         """
@@ -194,7 +203,8 @@ TAIGA_EXTENSION_COUNTS = {
         """
         select owner_id as user_id, count(*) as total
           from userstories_userstory
-         where project_id = :project_id and owner_id is not null
+         where (not cast(:filtered as boolean) or id = any(cast(:userstory_ids as integer[])))
+           and project_id = :project_id and owner_id is not null
            and (cast(:since as timestamptz) is null or created_date >= :since) and (cast(:until as timestamptz) is null or created_date < :until)
          group by 1
         """
@@ -203,7 +213,8 @@ TAIGA_EXTENSION_COUNTS = {
         """
         select cast(h."user"->>'pk' as integer) as user_id, count(*) as total
           from history_historyentry h
-         where h.project_id = :project_id
+         where (not cast(:filtered as boolean) or h.key = any(cast(:history_keys as text[])))
+           and h.project_id = :project_id
            and coalesce(h.comment, '') <> ''
            and h.delete_comment_date is null
            and (cast(:since as timestamptz) is null or h.created_at >= :since) and (cast(:until as timestamptz) is null or h.created_at < :until)
@@ -225,7 +236,9 @@ STORED_COUNTS = {
           left join column_type source
             on source.project_id = t.project_id and source.item_type = t.item_type
            and source.status_id = t.from_status_id
-         where t.project_id = :project_id and t.kind = 'move' and t.user_id is not null
+         where (not cast(:filtered as boolean) or (t.item_type, t.item_id) in (
+             select * from unnest(cast(:key_types as text[]), cast(:key_ids as integer[]))
+           )) and t.project_id = :project_id and t.kind = 'move' and t.user_id is not null
            and source.type is distinct from 'done'
            and (cast(:since as timestamptz) is null or t.happened_at >= :since) and (cast(:until as timestamptz) is null or t.happened_at < :until)
          group by 1
@@ -235,7 +248,9 @@ STORED_COUNTS = {
         """
         select user_id, count(*) as total
           from transition
-         where project_id = :project_id and kind = 'move' and user_id is not null
+         where (not cast(:filtered as boolean) or (item_type, item_id) in (
+             select * from unnest(cast(:key_types as text[]), cast(:key_ids as integer[]))
+           )) and project_id = :project_id and kind = 'move' and user_id is not null
            and (cast(:since as timestamptz) is null or happened_at >= :since) and (cast(:until as timestamptz) is null or happened_at < :until)
          group by 1
         """
@@ -258,6 +273,7 @@ async def credited_returns(
     project_id: int,
     since: datetime | None,
     until: datetime | None,
+    keys: Collection[CardKey] | None = None,
 ) -> dict[int, int]:
     """How many returns of every card type each person is credited with in the period.
 
@@ -268,7 +284,12 @@ async def credited_returns(
     now = datetime.now(UTC)
     for item_type in ITEM_TYPES.values():
         params = {"project_id": project_id, "item_type": item_type}
-        columns, cards = await data.cards(connection, params)
+        item_ids = (
+            None if keys is None else [item_id for kind, item_id in keys if kind == item_type]
+        )
+        if item_ids is not None and not item_ids:
+            continue
+        columns, cards = await data.cards(connection, params, item_ids)
         rules, misclick = await data.return_options(connection, project_id, item_type)
         by_id = {column.status_id: column for column in columns}
         options = FlowOptions(
@@ -290,7 +311,12 @@ class TeamSource(Protocol):
     """Anything that can count the team statistics of a project."""
 
     async def stats(
-        self, project_id: int, since: datetime | None = None, until: datetime | None = None
+        self,
+        project_id: int,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        *,
+        cards: Collection[CardKey] | None = None,
     ) -> TeamStats:
         """Every metric's count per user of the project, over the period if one is given."""
         ...
@@ -305,10 +331,26 @@ class DatabaseTeamStats:
         self.metrics_engine = metrics_engine
 
     async def stats(
-        self, project_id: int, since: datetime | None = None, until: datetime | None = None
+        self,
+        project_id: int,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        *,
+        cards: Collection[CardKey] | None = None,
     ) -> TeamStats:
         """Every count for everyone who has any, of events between ``since`` and ``until``."""
-        params = {"project_id": project_id, "since": since, "until": until}
+        params = {
+            "project_id": project_id,
+            "since": since,
+            "until": until,
+            "filtered": cards is not None,
+            "issue_ids": [item_id for kind, item_id in cards or [] if kind == "issue"],
+            "task_ids": [item_id for kind, item_id in cards or [] if kind == "task"],
+            "userstory_ids": [item_id for kind, item_id in cards or [] if kind == "userstory"],
+            "history_keys": [history_key(kind, item_id) for kind, item_id in cards or []],
+            "key_types": [kind for kind, _ in cards or []],
+            "key_ids": [item_id for _, item_id in cards or []],
+        }
         values: dict[str, dict[int, int]] = {}
         async with self.taiga_engine.connect() as connection:
             for key, query in {**COUNTS, **TAIGA_EXTENSION_COUNTS}.items():
@@ -321,7 +363,9 @@ class DatabaseTeamStats:
                 values[key] = {
                     row.user_id: row.total for row in await connection.execute(query, params)
                 }
-            values["sent_back"] = await credited_returns(connection, project_id, since, until)
+            values["sent_back"] = await credited_returns(
+                connection, project_id, since, until, cards
+            )
         modules: list[Module] = []
         if row is not None:
             modules = [module for module in ("issues", "tasks", "wiki") if row._mapping[module]]

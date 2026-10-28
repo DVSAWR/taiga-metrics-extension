@@ -154,6 +154,9 @@ export function SearchPage({
 
   useEffect(() => {
     let cancelled = false;
+    setCards(null);
+    setOpen(null);
+    setError(null);
     const timer = window.setTimeout(() => {
       searchCards(slug, query, filter, selection)
         .then((next) => {

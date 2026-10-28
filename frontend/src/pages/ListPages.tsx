@@ -10,6 +10,7 @@ import {
   type BreakdownRow,
   type DirectionRef,
   type FlowResponse,
+  type FilterSelection,
   type ItemType,
   type Me,
   type Period,
@@ -19,14 +20,14 @@ import {
 import { rowCards, subjectCards, type CountKind } from "../cardLists";
 import { formatDuration } from "../charts/format";
 import { Breakdown } from "../components/Breakdown";
-import { PeriodPanel } from "../components/FilterPanel";
+import { FilterPanel } from "../components/FilterPanel";
 import { MetricList } from "../components/MetricList";
 import { MetricPopup } from "../components/MetricPopup";
 import { PersonLink } from "../components/PersonLink";
 import { TextLink } from "../components/TextLink";
 import { rolePath } from "../router";
 import { canOpen } from "../projectAccess";
-import { useItemType, usePeriod, EMPTY_SELECTION } from "../filterState";
+import { useItemType, usePeriod, useFilterSelection } from "../filterState";
 import { firstTime, formatNumber } from "../format";
 import { Empty, MetricCard } from "./FlowMetrics";
 import { NotFoundPage } from "./HomePage";
@@ -43,6 +44,7 @@ function PersonCount({
   person,
   itemType,
   period,
+  selection,
   kind,
   value,
 }: {
@@ -50,6 +52,7 @@ function PersonCount({
   person: PersonSummary;
   itemType: ItemType;
   period: Period;
+  selection: FilterSelection;
   kind: PersonMetricKind;
   value: number | null;
 }) {
@@ -58,12 +61,12 @@ function PersonCount({
   useEffect(() => {
     setAnalysis(null);
     setError(null);
-  }, [slug, person.user_id, itemType, period]);
+  }, [slug, person.user_id, itemType, period, selection]);
   if (value === null || (value === 0 && kind !== "lead_time" && kind !== "cycle_time"))
     return <>·</>;
   const open = () => {
     if (analysis) return;
-    fetchAnalysis(slug, { kind: "person", id: person.user_id }, itemType, EMPTY_SELECTION, period)
+    fetchAnalysis(slug, { kind: "person", id: person.user_id }, itemType, selection, period)
       .then((next) => {
         setAnalysis(next);
         setError(null);
@@ -120,6 +123,7 @@ function PeopleTable({
   me,
   itemType,
   period,
+  selection,
   canOpenRole,
 }: {
   slug: string;
@@ -128,6 +132,7 @@ function PeopleTable({
   me: Me;
   itemType: ItemType;
   period: Period;
+  selection: FilterSelection;
   canOpenRole: boolean;
 }) {
   const rows = [...people].sort(
@@ -146,7 +151,20 @@ function PeopleTable({
             <th className="num">Lead time</th>
             <th className="num">Cycle time</th>
             <th className="num">First time</th>
-            <th className="num">Came back</th>
+            <th className="num">Return events</th>
+            <th className="num">Returned cards</th>
+            <th
+              className="num"
+              title="Return events after each card's first return credited to this person in the period"
+            >
+              Repeat returns
+            </th>
+            <th
+              className="num"
+              title="Cards with two or more credited returns / all returned cards for this person in the period"
+            >
+              Repeat return rate
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -157,6 +175,7 @@ function PeopleTable({
                 person={person}
                 itemType={itemType}
                 period={period}
+                selection={selection}
                 kind={kind}
                 value={value}
               />
@@ -196,6 +215,11 @@ function PeopleTable({
                   </span>
                 </td>
                 <td className="num">{count("returns", person.returns)}</td>
+                <td className="num">{formatNumber(person.returned_cards)}</td>
+                <td className="num">{count("repeat_returns", person.repeat_returns)}</td>
+                <td className="num">
+                  {person.repeat_rate === null ? "-" : `${Math.round(person.repeat_rate * 100)}%`}
+                </td>
               </tr>
             );
           })}
@@ -218,13 +242,14 @@ export function PeoplePage({
   const types = projectTypes(project);
   const [itemType, setItemType] = useItemType(slug, types);
   const [period, setPeriod] = usePeriod(slug);
+  const [selection, setSelection] = useFilterSelection(slug);
   const [people, setPeople] = useState<PersonSummary[] | null>(null);
   const [directions, setDirections] = useState<DirectionRef[]>([]);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
     setPeople(null);
-    fetchPeopleSummary(slug, itemType, period)
+    fetchPeopleSummary(slug, itemType, period, selection)
       .then((next) => {
         if (!cancelled) {
           setPeople(next);
@@ -237,7 +262,7 @@ export function PeoplePage({
     return () => {
       cancelled = true;
     };
-  }, [slug, itemType, period]);
+  }, [slug, itemType, period, selection]);
   useEffect(() => {
     let cancelled = false;
     fetchDirections(slug)
@@ -253,8 +278,11 @@ export function PeoplePage({
     <>
       <h1>People</h1>
       <div className="with-filters">
-        <PeriodPanel
+        <FilterPanel
           slug={slug}
+          itemType={itemType}
+          selection={selection}
+          onChange={setSelection}
           period={period}
           onPeriodChange={setPeriod}
           typeChoice={{ types, value: itemType, onChange: setItemType }}
@@ -271,13 +299,14 @@ export function PeoplePage({
                 <Empty>Nobody to show.</Empty>
               ) : (
                 <PeopleTable
-                  key={`${itemType}:${JSON.stringify(period)}`}
+                  key={`${itemType}:${JSON.stringify(period)}:${JSON.stringify(selection)}`}
                   slug={slug}
                   people={people}
                   roles={roles}
                   me={me}
                   itemType={itemType}
                   period={period}
+                  selection={selection}
                   canOpenRole={Boolean(project && canOpen(project, "directions"))}
                 />
               )}
@@ -302,6 +331,7 @@ export function RolesPage({
   const types = projectTypes(project);
   const [itemType, setItemType] = useItemType(slug, types);
   const [period, setPeriod] = usePeriod(slug);
+  const [selection, setSelection] = useFilterSelection(slug);
   const [roles, setRoles] = useState<BreakdownRow[] | null>(null);
   const [flow, setFlow] = useState<FlowResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -310,8 +340,8 @@ export function RolesPage({
     setRoles(null);
     setFlow(null);
     Promise.all([
-      fetchDirectionSummary(slug, itemType, period),
-      fetchFlow(slug, itemType, EMPTY_SELECTION, period),
+      fetchDirectionSummary(slug, itemType, period, selection),
+      fetchFlow(slug, itemType, selection, period),
     ])
       .then(([nextRoles, nextFlow]) => {
         if (!cancelled) {
@@ -326,14 +356,17 @@ export function RolesPage({
     return () => {
       cancelled = true;
     };
-  }, [slug, itemType, period]);
+  }, [slug, itemType, period, selection]);
   if (projects && !project) return <NotFoundPage />;
   return (
     <>
       <h1>Roles</h1>
       <div className="with-filters">
-        <PeriodPanel
+        <FilterPanel
           slug={slug}
+          itemType={itemType}
+          selection={selection}
+          onChange={setSelection}
           period={period}
           onPeriodChange={setPeriod}
           typeChoice={{ types, value: itemType, onChange: setItemType }}

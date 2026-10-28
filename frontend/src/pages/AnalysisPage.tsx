@@ -6,6 +6,8 @@ import {
   subjectKey,
   type Analysis,
   type FlowReport,
+  type FilterSelection,
+  type ItemType,
   type Me,
   type ProjectSummary,
   type Subject,
@@ -130,15 +132,22 @@ function PersonTop({
   me,
   taigaUrl,
   canOpenRole,
+  selection,
+  itemType,
 }: {
   slug: string;
   userId: number;
   me: Me;
   taigaUrl: string | null;
   canOpenRole: boolean;
+  selection: FilterSelection;
+  itemType: ItemType;
 }) {
   const [period] = usePeriod(slug);
-  const [person] = useLoaded(() => fetchPerson(slug, userId, period), [slug, userId, period]);
+  const [person] = useLoaded(
+    () => fetchPerson(slug, userId, period, selection, itemType),
+    [slug, userId, period, selection, itemType],
+  );
   return person ? (
     <Header
       person={person}
@@ -150,13 +159,26 @@ function PersonTop({
   ) : null;
 }
 
-function PersonBottom({ slug, userId }: { slug: string; userId: number }) {
+function PersonBottom({
+  slug,
+  userId,
+  selection,
+  itemType,
+}: {
+  slug: string;
+  userId: number;
+  selection: FilterSelection;
+  itemType: ItemType;
+}) {
   const [period] = usePeriod(slug);
-  const [person] = useLoaded(() => fetchPerson(slug, userId, period), [slug, userId, period]);
+  const [person] = useLoaded(
+    () => fetchPerson(slug, userId, period, selection, itemType),
+    [slug, userId, period, selection, itemType],
+  );
   return person ? (
     <MetricCard
       title="Achievements"
-      subtitle="Taiga's Team counts and the extension's, over the period"
+      subtitle="Taiga's Team counts and the extension's, for the selected cards and period"
     >
       <div className="metric-chart">
         <Achievements person={person} />
@@ -192,6 +214,8 @@ export function AnalysisPage({
 
   useEffect(() => {
     let cancelled = false;
+    setAnalysis(null);
+    setError(null);
     fetchAnalysis(slug, subject, itemType, selection, period)
       .then((next) => {
         if (!cancelled) {
@@ -282,6 +306,8 @@ export function AnalysisPage({
           me={me}
           taigaUrl={taigaUrl}
           canOpenRole={Boolean(project && canOpen(project, "directions"))}
+          selection={selection}
+          itemType={itemType}
         />
       ) : (
         <h1>{current?.name ?? (subject.kind === "project" ? project?.name ?? slug : "Role")}</h1>
@@ -384,7 +410,12 @@ export function AnalysisPage({
                   {subject.kind !== "role" && <SpeedCard {...tabProps} />}
                   <StuckAtEnd report={flow.report} statuses={statuses} list={stuckList} />
                   {subject.kind === "person" && subject.id !== null && (
-                    <PersonBottom slug={slug} userId={subject.id} />
+                    <PersonBottom
+                      slug={slug}
+                      userId={subject.id}
+                      selection={selection}
+                      itemType={itemType}
+                    />
                   )}
                 </>
               )}

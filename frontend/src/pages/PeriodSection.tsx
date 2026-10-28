@@ -1275,6 +1275,9 @@ export function PeriodSection({
       return;
     }
     let cancelled = false;
+    setData(null);
+    setError(null);
+    setOpened(null);
     fetchPeriodStatusTimes(slug, shown, selection, scope)
       .then((next) => {
         if (!cancelled) {

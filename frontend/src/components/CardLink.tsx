@@ -18,8 +18,7 @@ export function CardLink({
     <TextLink
       to={cardPath(slug, MODULE_OF_TYPE[itemType], itemId)}
       title={subject}
-      target="_blank"
-      rel="noreferrer"
+      onClick={(event) => event.stopPropagation()}
     >
       {subject}
     </TextLink>

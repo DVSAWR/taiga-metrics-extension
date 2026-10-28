@@ -29,7 +29,7 @@ export function MetricPopup({
 }: {
   label: string;
   children: ReactNode;
-  content: ReactNode;
+  content: ReactNode | (() => ReactNode);
   onOpen?: () => void;
   className?: string;
 }) {
@@ -120,7 +120,9 @@ export function MetricPopup({
       >
         {children}
       </button>
-      {open && inlineHost && createPortal(content, inlineHost)}
+      {open &&
+        inlineHost &&
+        createPortal(typeof content === "function" ? content() : content, inlineHost)}
     </>
   );
 }

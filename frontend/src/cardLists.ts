@@ -4,11 +4,18 @@ import type {
   FirstPassEvent,
   FlowReport,
   ReturnEvent,
+  ReturnStats,
   StuckCard,
 } from "./api";
 import type { ListedCard } from "./pages/FlowMetrics";
 
-export type CountKind = "in_progress" | "stuck" | "finished" | "first_time" | "returns";
+export type CountKind =
+  | "in_progress"
+  | "stuck"
+  | "finished"
+  | "first_time"
+  | "returns"
+  | "repeat_returns";
 
 export interface OpenedList {
   title: string;
@@ -59,6 +66,28 @@ function inside(statuses: number[] | null, status: number | null): boolean {
   return statuses === null || (status !== null && statuses.includes(status));
 }
 
+export function repeatReturns(events: ReturnEvent[]): ReturnEvent[] {
+  const first = new Map<number, ReturnEvent>();
+  for (const event of events) {
+    const known = first.get(event.item_id);
+    if (!known || event.happened_at < known.happened_at) first.set(event.item_id, event);
+  }
+  return events.filter((event) => first.get(event.item_id) !== event);
+}
+
+export function returnStats(events: ReturnEvent[]): ReturnStats {
+  const counts = new Map<number, number>();
+  for (const event of events) counts.set(event.item_id, (counts.get(event.item_id) ?? 0) + 1);
+  const repeated = [...counts.values()].filter((count) => count > 1).length;
+  return {
+    returns: events.length,
+    returned_cards: counts.size,
+    repeat_returns: events.length - counts.size,
+    repeated_cards: repeated,
+    repeat_rate: counts.size > 0 ? repeated / counts.size : null,
+  };
+}
+
 /** The cards behind one of the key numbers of a subject. */
 export function subjectCards(
   report: FlowReport,
@@ -79,22 +108,23 @@ export function subjectCards(
       ),
     };
   }
-  if (kind === "returns") {
+  if (kind === "returns" || kind === "repeat_returns") {
     const rework = new Set(
       report.columns
         .filter((column) => column.name.trim().toUpperCase() === "REWORK")
         .map((column) => column.status_id),
     );
+    const events = (report.credited_returns ?? report.back_moves.events).filter(
+      (event) =>
+        inside(statuses, event.credited_status) &&
+        (personId === null || event.credited.includes(personId)) &&
+        (statuses === null || personId !== null || !rework.has(event.to_status)),
+    );
     return {
-      title: "Return events",
+      title: kind === "repeat_returns" ? "Repeat return events" : "Return events",
       timeLabel: "Returned at",
       cards: [],
-      returns: report.back_moves.events.filter(
-        (event) =>
-          inside(statuses, event.credited_status) &&
-          (personId === null || event.credited.includes(personId)) &&
-          (statuses === null || !rework.has(event.to_status)),
-      ),
+      returns: kind === "repeat_returns" ? repeatReturns(events) : events,
     };
   }
   if (kind === "stuck") {
@@ -160,21 +190,29 @@ export function rowCards(
   subjectPersonId: number | null = null,
 ): OpenedList {
   const own = row.kind === "person" ? statuses : row.kind === "status" ? [row.id] : row.statuses;
-  const base = subjectCards(report, own, kind);
-  if (kind === "first_time" || kind === "returns") {
+  const base = subjectCards(
+    report,
+    own,
+    kind === "repeat_returns" ? "returns" : kind,
+    row.kind === "status" ? subjectPersonId : null,
+  );
+  if (kind === "first_time" || kind === "returns" || kind === "repeat_returns") {
+    const events = base.returns?.filter((event) =>
+      row.kind === "person"
+        ? event.credited.includes(row.id)
+        : subjectPersonId === null || event.credited.includes(subjectPersonId),
+    );
     return {
       ...base,
-      title: `${row.name}: ${base.title.toLowerCase()}`,
+      title: `${row.name}: ${
+        kind === "repeat_returns" ? "repeat return events" : base.title.toLowerCase()
+      }`,
       firstPasses: base.firstPasses?.filter((event) =>
         row.kind === "person"
           ? event.author === row.id
           : subjectPersonId === null || event.author === subjectPersonId,
       ),
-      returns: base.returns?.filter((event) =>
-        row.kind === "person"
-          ? event.credited.includes(row.id)
-          : subjectPersonId === null || event.credited.includes(subjectPersonId),
-      ),
+      returns: kind === "repeat_returns" && events ? repeatReturns(events) : events,
     };
   }
   const cards =

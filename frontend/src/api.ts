@@ -76,11 +76,11 @@ export interface Sprint {
 export const UNAUTHORIZED_EVENT = "taiga-metrics:unauthorized";
 
 export class ApiError extends Error {
-  constructor(
-    message: string,
-    readonly status: number,
-  ) {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
     super(message);
+    this.status = status;
   }
 }
 
@@ -122,8 +122,14 @@ async function request<T>(url: string, init: RequestInit = {}): Promise<T> {
   return (await response.json()) as T;
 }
 
+const pendingGets = new Map<string, Promise<unknown>>();
+
 function getJson<T>(url: string): Promise<T> {
-  return request<T>(url);
+  const known = pendingGets.get(url);
+  if (known) return known as Promise<T>;
+  const pending = request<T>(url).finally(() => pendingGets.delete(url));
+  pendingGets.set(url, pending);
+  return pending;
 }
 
 export function fetchHealth(slug: string): Promise<HealthReport> {
@@ -975,6 +981,7 @@ export interface FlowReport {
   column_cards: ColumnCard[];
   finishes: FinishedCard[];
   first_passes: FirstPassEvent[];
+  credited_returns: ReturnEvent[] | null;
 }
 
 export interface ColumnCard {
@@ -1173,9 +1180,17 @@ function personApi(slug: string, userId: number): string {
   return `${projectApi(slug)}/people/${userId}`;
 }
 
-export function fetchPerson(slug: string, userId: number, period: Period): Promise<PersonPage> {
+export function fetchPerson(
+  slug: string,
+  userId: number,
+  period: Period,
+  selection: FilterSelection | null = null,
+  itemType: ItemType | null = null,
+): Promise<PersonPage> {
   const params = new URLSearchParams();
   addPeriod(params, period);
+  addSelection(params, selection);
+  if (itemType !== null) params.set("item_type", itemType);
   return getJson<PersonPage>(`${personApi(slug, userId)}?${params}`);
 }
 
@@ -1184,9 +1199,11 @@ export function fetchPersonFlow(
   userId: number,
   itemType: ItemType,
   period: Period,
+  selection: FilterSelection | null = null,
 ): Promise<FlowResponse> {
   const params = new URLSearchParams({ item_type: itemType });
   addPeriod(params, period);
+  addSelection(params, selection);
   return getJson<FlowResponse>(`${personApi(slug, userId)}/flow?${params}`);
 }
 
@@ -1194,9 +1211,13 @@ export function fetchPersonActivity(
   slug: string,
   userId: number,
   period: Period,
+  selection: FilterSelection | null = null,
+  itemType: ItemType | null = null,
 ): Promise<PersonActivity> {
   const params = new URLSearchParams();
   addPeriod(params, period);
+  addSelection(params, selection);
+  if (itemType !== null) params.set("item_type", itemType);
   return getJson<PersonActivity>(`${personApi(slug, userId)}/activity?${params}`);
 }
 
@@ -1219,9 +1240,13 @@ export function fetchTeamActivity(
   period: Period,
   role: number | null = null,
   person: number | null = null,
+  selection: FilterSelection | null = null,
+  itemType: ItemType | null = null,
 ): Promise<TeamActivity> {
   const params = new URLSearchParams();
   addPeriod(params, period);
+  addSelection(params, selection);
+  if (itemType !== null) params.set("item_type", itemType);
   if (role !== null) {
     params.set("role", String(role));
   }
@@ -1248,9 +1273,13 @@ export function fetchTeamEvents(
   role: number | null,
   person: number | null,
   kind: ActivityKind | null,
+  selection: FilterSelection | null = null,
+  itemType: ItemType | null = null,
 ): Promise<TeamEvents> {
   const params = new URLSearchParams();
   addPeriod(params, period);
+  addSelection(params, selection);
+  if (itemType !== null) params.set("item_type", itemType);
   if (role !== null) {
     params.set("role", String(role));
   }
@@ -1263,7 +1292,15 @@ export function fetchTeamEvents(
   return getJson<TeamEvents>(`${projectApi(slug)}/activity/events?${params}`);
 }
 
-export interface ColumnShare {
+export interface ReturnStats {
+  returns: number;
+  returned_cards: number;
+  repeat_returns: number;
+  repeated_cards: number;
+  repeat_rate: number | null;
+}
+
+export interface ColumnShare extends ReturnStats {
   status_id: number;
   name: string;
   color: string;
@@ -1283,10 +1320,11 @@ export interface ColumnShare {
   returns: number;
 }
 
-export interface PersonShare {
+export interface PersonShare extends ReturnStats {
   role_id: number | null;
   columns: ColumnShare[];
   roles: Record<string, string>;
+  events: ReturnEvent[];
 }
 
 export function fetchPersonShare(
@@ -1294,9 +1332,11 @@ export function fetchPersonShare(
   userId: number,
   itemType: ItemType,
   period: Period,
+  selection: FilterSelection | null = null,
 ): Promise<PersonShare> {
   const params = new URLSearchParams({ item_type: itemType });
   addPeriod(params, period);
+  addSelection(params, selection);
   return getJson<PersonShare>(`${personApi(slug, userId)}/share?${params}`);
 }
 
@@ -1337,7 +1377,7 @@ export interface DirectionColumn {
   wip_limit: number | null;
 }
 
-export interface DirectionPerson {
+export interface DirectionPerson extends ReturnStats {
   user_id: number;
   member: boolean;
   stays: number;
@@ -1349,7 +1389,7 @@ export interface DirectionPerson {
   returns: number;
 }
 
-export interface DirectionFlow {
+export interface DirectionFlow extends ReturnStats {
   columns: DirectionColumn[];
   in_now: number;
   stuck: StuckCard[];
@@ -1371,9 +1411,11 @@ export function fetchDirectionSummary(
   slug: string,
   itemType: ItemType,
   period: Period,
+  selection: FilterSelection | null = null,
 ): Promise<BreakdownRow[]> {
   const params = new URLSearchParams({ item_type: itemType });
   addPeriod(params, period);
+  addSelection(params, selection);
   return getJson<BreakdownRow[]>(`${projectApi(slug)}/directions/summary?${params}`);
 }
 
@@ -1382,9 +1424,11 @@ export function fetchDirection(
   roleId: number,
   itemType: ItemType,
   period: Period,
+  selection: FilterSelection | null = null,
 ): Promise<DirectionFlow> {
   const params = new URLSearchParams({ item_type: itemType });
   addPeriod(params, period);
+  addSelection(params, selection);
   return getJson<DirectionFlow>(`${projectApi(slug)}/directions/${roleId}?${params}`);
 }
 
@@ -1395,7 +1439,7 @@ export interface Subject {
   id: number | null;
 }
 
-export interface Tiles {
+export interface Tiles extends ReturnStats {
   in_progress: number;
   stuck: number;
   finished: number;
@@ -1408,7 +1452,7 @@ export interface Tiles {
   returns: number;
 }
 
-export interface BreakdownRow {
+export interface BreakdownRow extends ReturnStats {
   kind: "role" | "person" | "status";
   id: number;
   name: string;
@@ -1461,7 +1505,7 @@ export function fetchAnalysis(
   return getJson<Analysis>(`${projectApi(slug)}/analysis?${params}`);
 }
 
-export interface PersonSummary {
+export interface PersonSummary extends ReturnStats {
   user_id: number;
   name: string;
   username: string | null;
@@ -1480,8 +1524,10 @@ export function fetchPeopleSummary(
   slug: string,
   itemType: ItemType,
   period: Period,
+  selection: FilterSelection | null = null,
 ): Promise<PersonSummary[]> {
   const params = new URLSearchParams({ item_type: itemType });
   addPeriod(params, period);
+  addSelection(params, selection);
   return getJson<PersonSummary[]>(`${projectApi(slug)}/people?${params}`);
 }

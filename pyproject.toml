@@ -7,7 +7,7 @@ requires = [
 
 [project]
 name = "taiga-metrics"
-version = "0.2.0"
+version = "0.2.1"
 description = "Flow and team metrics for self-hosted Taiga, read directly from its database"
 authors = [
     {name = "Daniil Gruzdev", email = "gruzdev.daniil@gmail.com"}
@@ -111,6 +111,7 @@ strict = true
 runtime-evaluated-base-classes = [
     "pydantic.BaseModel",
     "pydantic_settings.BaseSettings",
+    "taiga_metrics.metrics.quality.ReturnStats",
 ]
 runtime-evaluated-decorators = ["dataclasses.dataclass"]
 

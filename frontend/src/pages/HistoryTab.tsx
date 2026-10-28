@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   fetchTransitions,
@@ -252,9 +252,16 @@ export function HistoryTab({
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const query = JSON.stringify([slug, itemType, selection, period]);
+  const activeQuery = useRef({ key: query, token: {} });
+  if (activeQuery.current.key !== query) activeQuery.current = { key: query, token: {} };
 
   useEffect(() => {
     let cancelled = false;
+    setRows(null);
+    setHasMore(false);
+    setLoadingMore(false);
+    setError(null);
     fetchTransitions(slug, itemType, selection, period, 0, PAGE_SIZE)
       .then((page) => {
         if (!cancelled) {
@@ -278,15 +285,20 @@ export function HistoryTab({
       return;
     }
     setLoadingMore(true);
+    const requested = activeQuery.current.token;
     fetchTransitions(slug, itemType, selection, period, rows.length, PAGE_SIZE)
       .then((page) => {
+        if (requested !== activeQuery.current.token) return;
         setRows([...rows, ...page.rows]);
         setHasMore(page.has_more);
       })
       .catch((reason: unknown) => {
+        if (requested !== activeQuery.current.token) return;
         setError(reason instanceof Error ? reason.message : String(reason));
       })
-      .finally(() => setLoadingMore(false));
+      .finally(() => {
+        if (requested === activeQuery.current.token) setLoadingMore(false);
+      });
   };
 
   return (

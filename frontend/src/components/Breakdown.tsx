@@ -53,7 +53,7 @@ export function Breakdown({
     !value ? (
       "·"
     ) : expand ? (
-      <MetricPopup label={`Show ${row.name}: ${kind}`} content={expand(row, kind)}>
+      <MetricPopup label={`Show ${row.name}: ${kind}`} content={() => expand(row, kind)}>
         {formatNumber(value)}
       </MetricPopup>
     ) : (
@@ -73,7 +73,20 @@ export function Breakdown({
             <th className="num">{TIME_LABEL[kind]}</th>
             {shares && <th className="bar-cell">Share of the time</th>}
             <th className="num">First time</th>
-            <th className="num">Came back</th>
+            <th className="num">Return events</th>
+            <th className="num">Returned cards</th>
+            <th
+              className="num"
+              title="Return events after each card's first return in this row and period"
+            >
+              Repeat returns
+            </th>
+            <th
+              className="num"
+              title="Cards with two or more returns / all returned cards in this row and period"
+            >
+              Repeat return rate
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -113,6 +126,11 @@ export function Breakdown({
                     </span>
                   </td>
                   <td className="num">{count(row, "returns", row.returns)}</td>
+                  <td className="num">{formatNumber(row.returned_cards)}</td>
+                  <td className="num">{count(row, "repeat_returns", row.repeat_returns)}</td>
+                  <td className="num">
+                    {row.repeat_rate === null ? "-" : `${Math.round(row.repeat_rate * 100)}%`}
+                  </td>
                 </tr>
               </Fragment>
             );

@@ -6,6 +6,8 @@ Taiga Metrics is an extension that runs next to your Taiga. It never changes Tai
 
 - Works with any process: statuses, columns and roles are read from each project's settings, never assumed.
 - One screen for the project, each direction (a role and the statuses it answers for) and each person: key numbers, stuck cards, the split one level down, time in statuses, speed, period by period, and activity; any two to four of them can be compared. Only the card types switched on in Taiga are offered; sprints are Taiga's while Scrum is on; without Scrum the owner can set equal reporting periods (every 1 to 4 weeks) in Settings, Calendar.
+- Return tables distinguish events, distinct returned cards and repeat returns. Within the selected period and subject, a card returned three times contributes three events and two repeat returns. The repeat return rate is the percentage of returned cards with at least two returns. Personal totals follow the project's attribution rule; totals across statuses are deduplicated by card.
+- Included tags must all be present on a card. Other values within one filter category are alternatives; categories are combined, and any excluded value removes a card. The same selection applies to Overview, Roles, People, Activity, Trends, Search, History, personal achievements and their card lists. Filters are remembered per project and kept when navigating between these pages.
 - Data is copied from Taiga every hour (configurable). You can also start a copy by hand.
 
 > Taiga Metrics is an independent open-source project. It is not affiliated with, endorsed by or supported by Taiga or Kaleidos Inc. Taiga is a trademark of its owners and is named here only to say what this extension works with.
@@ -196,6 +198,8 @@ curl -fsSLO https://github.com/DVSAWR/taiga-metrics-extension/releases/latest/do
 Database changes are applied on start. Your settings in `taiga-metrics.env` and the extension's data are kept. The list of changes is on the [releases page](https://github.com/DVSAWR/taiga-metrics-extension/releases).
 
 To run a specific version, set `TAIGA_METRICS_VERSION=1.2.0` in `taiga-metrics.env` and run `./taiga-metrics.sh update`.
+
+If `TAIGA_METRICS_IMAGE` is set, it overrides `TAIGA_METRICS_VERSION`; update its image tag too, or remove it to use the version setting. After updating, check `./taiga-metrics.sh status` and run `./taiga-metrics.sh compose exec -T taiga-metrics python -m taiga_metrics check`, then reload the browser page.
 
 ## Stop, remove, uninstall
 

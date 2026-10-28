@@ -26,20 +26,29 @@ function readJson<T>(key: string, fallback: T): T {
 const STORED_EVENT = "taiga-metrics:stored";
 
 function usePersisted<T>(key: string, fallback: T): [T, (value: T) => void] {
-  const [value, setValue] = useState<T>(() => readJson(key, fallback));
+  const [state, setState] = useState(() => ({ key, value: readJson(key, fallback) }));
+  const value = useMemo(
+    () => (state.key === key ? state.value : readJson(key, fallback)),
+    [state, key],
+  );
   useEffect(() => {
-    setValue(readJson(key, fallback));
+    const refresh = () => setState({ key, value: readJson(key, fallback) });
+    refresh();
     const changed = (event: Event) => {
       if ((event as CustomEvent<string>).detail === key) {
-        setValue(readJson(key, fallback));
+        refresh();
       }
     };
     window.addEventListener(STORED_EVENT, changed);
-    return () => window.removeEventListener(STORED_EVENT, changed);
+    window.addEventListener("storage", refresh);
+    return () => {
+      window.removeEventListener(STORED_EVENT, changed);
+      window.removeEventListener("storage", refresh);
+    };
   }, [key]);
   const update = useCallback(
     (next: T) => {
-      setValue(next);
+      setState({ key, value: next });
       writeStored(key, JSON.stringify(next));
       window.dispatchEvent(new CustomEvent(STORED_EVENT, { detail: key }));
     },

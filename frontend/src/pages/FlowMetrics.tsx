@@ -7,6 +7,7 @@ import type {
   ItemType,
   MoveCount,
   MoveEvent,
+  ReturnEvent,
   Sample,
 } from "../api";
 import { BarChart } from "../charts/BarChart";
@@ -38,6 +39,7 @@ import { MODULE_OF_TYPE } from "../modules";
 import { TextLink } from "../components/TextLink";
 import { Icon } from "../icons";
 import { readStored, writeStored } from "../storage";
+import { repeatReturns, returnStats } from "../cardLists";
 
 export function Expandable({ label, children }: { label: string; children: ReactNode }) {
   const [open, setOpen] = useState(false);
@@ -274,6 +276,43 @@ function restNote(mine: number | null, theirs: number | null): { text: string; c
     : { text: `median ${-change}% shorter than the rest`, color: TREND_GOOD };
 }
 
+function ReturnSummaryCells({
+  events,
+  title,
+  ...props
+}: TabProps & { events: ReturnEvent[]; title: string }) {
+  const stats = returnStats(events);
+  return (
+    <>
+      <td className="num">{formatNumber(stats.returned_cards)}</td>
+      <td className="num">
+        {stats.repeat_returns > 0 ? (
+          <MetricPopup
+            label={`Show repeat returns: ${title}`}
+            content={() => (
+              <ReturnEventList
+                {...props}
+                title={`${title}: repeat returns`}
+                events={repeatReturns(events)}
+              />
+            )}
+          >
+            {formatNumber(stats.repeat_returns)}
+          </MetricPopup>
+        ) : (
+          "·"
+        )}
+      </td>
+      <td
+        className="num"
+        title={`${stats.repeated_cards} of ${stats.returned_cards} returned cards came back more than once`}
+      >
+        {stats.repeat_rate === null ? "-" : `${Math.round(stats.repeat_rate * 100)}%`}
+      </td>
+    </>
+  );
+}
+
 function ColumnTimes({
   open,
   setOpen,
@@ -298,18 +337,16 @@ function ColumnTimes({
   );
   const width = (days: number | null) => (max > 0 && days ? (days / max) * 100 : 0);
   const cameBack = new Map<number, number>();
-  for (const move of flow.report.back_moves.moves) {
-    const credited = move.credited_status ?? move.to_status;
-    cameBack.set(credited, (cameBack.get(credited) ?? 0) + move.count);
+  const events = flow.report.credited_returns ?? flow.report.back_moves.events;
+  for (const event of events) {
+    cameBack.set(event.credited_status, (cameBack.get(event.credited_status) ?? 0) + 1);
   }
-  const allBack = columns.reduce((sum, column) => sum + (cameBack.get(column.status_id) ?? 0), 0);
   const columnIds = new Set(columns.map((column) => column.status_id));
   const cleanEvents = flow.report.first_passes.filter(
     (event) => event.clean && columnIds.has(event.status_id),
   );
-  const returnEvents = flow.report.back_moves.events.filter((event) =>
-    columnIds.has(event.credited_status),
-  );
+  const returnEvents = events.filter((event) => columnIds.has(event.credited_status));
+  const allBack = returnEvents.length;
   const eventSlices = (statusIds: number[]): Slice[] =>
     columns.flatMap((column) => {
       const count = statusIds.filter((id) => id === column.status_id).length;
@@ -342,6 +379,9 @@ function ColumnTimes({
           <col className="col-num" />
           <col className="col-num" />
           <col className="col-num" />
+          <col className="col-count" />
+          <col className="col-count" />
+          <col className="col-count" />
           <col className="col-count" />
           <col className="col-count" />
           <col className="col-count" />
@@ -386,7 +426,20 @@ function ColumnTimes({
               className="num"
               title="Returns in the period credited to the status, by the project's return rules: whose work came back"
             >
-              Came back
+              Return events
+            </th>
+            <th className="num">Returned cards</th>
+            <th
+              className="num"
+              title="Return events after each card's first return to this status in the period"
+            >
+              Repeat returns
+            </th>
+            <th
+              className="num"
+              title="Cards with two or more returns / all returned cards in this status and period"
+            >
+              Repeat return rate
             </th>
           </tr>
         </thead>
@@ -561,7 +614,7 @@ function ColumnTimes({
                           <ReturnEventList
                             {...props}
                             title={`${column.name}: returns`}
-                            events={flow.report.back_moves.events.filter(
+                            events={events.filter(
                               (event) => event.credited_status === column.status_id,
                             )}
                           />
@@ -573,10 +626,15 @@ function ColumnTimes({
                       "·"
                     )}
                   </td>
+                  <ReturnSummaryCells
+                    {...props}
+                    title={column.name}
+                    events={events.filter((event) => event.credited_status === column.status_id)}
+                  />
                 </tr>
                 {isOpen && (
                   <tr className="history-row">
-                    <td colSpan={10} className="matrix-panel-cell">
+                    <td colSpan={13} className="matrix-panel-cell">
                       <ColumnCards {...props} cards={isOpen.now ? now : passed} now={isOpen.now} />
                     </td>
                   </tr>
@@ -673,6 +731,7 @@ function ColumnTimes({
                 "·"
               )}
             </td>
+            <ReturnSummaryCells {...props} title="All statuses" events={returnEvents} />
           </tr>
           {open?.status === null && (
             <StatusTotals
@@ -728,12 +787,12 @@ function StatusTotals({
   return (
     <>
       <tr id={OPENED_CARDS} className="history-row donut-row">
-        <td colSpan={10}>
+        <td colSpan={13}>
           <DonutSplit slices={slices} total={total} caption="cards" />
         </td>
       </tr>
       <tr className="history-row">
-        <td colSpan={10} className="matrix-panel-cell glued">
+        <td colSpan={13} className="matrix-panel-cell glued">
           <ColumnCards {...props} cards={cards} now={now} withStatus />
         </td>
       </tr>

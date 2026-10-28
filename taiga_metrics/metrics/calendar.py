@@ -44,18 +44,28 @@ class WorkCalendar:
         zone = self.zone
         local_start = start.astimezone(zone)
         local_end = end.astimezone(zone)
-        seconds = 0.0
-        day = local_start.date()
-        while day <= local_end.date():
-            day_start = datetime.combine(day, time.min, zone)
-            day_end = datetime.combine(day + timedelta(days=1), time.min, zone)
-            if day.isoweekday() in self.working_days:
-                overlap_start = max(local_start, day_start)
-                overlap_end = min(local_end, day_end)
-                if overlap_end > overlap_start:
-                    seconds += (overlap_end - overlap_start).total_seconds()
-            day += timedelta(days=1)
-        return seconds / SECONDS_PER_DAY
+        first = local_start.date()
+        last = local_end.date()
+        if first == last:
+            return (
+                (local_end - local_start).total_seconds() / SECONDS_PER_DAY
+                if first.isoweekday() in self.working_days
+                else 0.0
+            )
+        days = 0.0
+        if first.isoweekday() in self.working_days:
+            midnight = datetime.combine(first + timedelta(days=1), time.min, zone)
+            days += (midnight - local_start).total_seconds() / SECONDS_PER_DAY
+        if last.isoweekday() in self.working_days:
+            midnight = datetime.combine(last, time.min, zone)
+            days += (local_end - midnight).total_seconds() / SECONDS_PER_DAY
+        weeks, remainder = divmod((last - first).days - 1, 7)
+        days += weeks * len(self.working_days)
+        days += sum(
+            (first.isoweekday() + offset) % 7 + 1 in self.working_days
+            for offset in range(remainder)
+        )
+        return days
 
     def week_start(self, moment: datetime) -> datetime:
         """Monday 00:00 of the week containing ``moment``, in this time zone."""

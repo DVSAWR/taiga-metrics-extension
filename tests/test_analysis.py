@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from taiga_metrics.analysis import Subject
 from taiga_metrics.directions import DirectionRef
 from taiga_metrics.filters import AssignmentFilter
+from taiga_metrics.metrics.engine import ReturnEvent
+from taiga_metrics.metrics.quality import return_stats
+from taiga_metrics.metrics.share import PersonShare
 from tests.conftest import HEADERS
 from tests.fakes import FakeFlowData
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
+
     import pytest
     from fastapi.testclient import TestClient
 
     from taiga_metrics.api.app import Services
+    from taiga_metrics.metrics.loader import Period
 
 
 def test_subjects_are_parsed() -> None:
@@ -101,6 +108,45 @@ def test_person_analysis_cannot_inherit_another_assignee_filter(
 def test_unknown_subjects_are_refused(client: TestClient) -> None:
     """A scope that is neither the project, a role, nor a person."""
     assert client.get("/api/projects/alpha/analysis", params={"scope": "x"}).status_code == 422
+
+
+def test_personal_return_totals_and_drilldowns_share_the_attribution_rule(
+    client: TestClient, services: Services, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Returns credited after handover remain in both the totals and the personal list."""
+    start = datetime(2026, 10, 1, tzinfo=UTC)
+    events = [
+        ReturnEvent(3, 5, "Login", start + timedelta(days=day), 4, status, status, frozenset({6}))
+        for day, status in ((1, 2), (2, 3))
+    ]
+
+    async def person_share(
+        project_id: int,
+        item_type: str,
+        user_id: int,
+        *,
+        period: Period,
+        item_ids: Collection[int] | None = None,
+        every: bool = False,
+    ) -> PersonShare:
+        return PersonShare(
+            **return_stats(event.item_id for event in events).model_dump(),
+            role_id=40,
+            columns=[],
+            roles={},
+            events=events,
+        )
+
+    monkeypatch.setattr(services.flow_data, "person_share", person_share)
+    response = client.get("/api/projects/alpha/analysis", params={"scope": "person:6"})
+    assert response.status_code == 200
+    analysis = response.json()
+    assert analysis["tiles"]["returns"] == 2
+    assert analysis["tiles"]["returned_cards"] == 1
+    assert analysis["tiles"]["repeat_returns"] == 1
+    assert analysis["tiles"]["repeat_rate"] == 1
+    assert len(analysis["flow"]["report"]["credited_returns"]) == 2
+    assert analysis["flow"]["report"]["back_moves"]["events"] == []
 
 
 def test_the_people_list_shows_others_only_with_the_people_section(

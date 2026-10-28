@@ -7,7 +7,7 @@ cards when the project's managers limited their role to those.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Annotated, Literal
 from zoneinfo import ZoneInfo
@@ -899,9 +899,7 @@ def add_analysis_routes(router: APIRouter) -> None:
         return Analysis(
             subject=subject,
             name=project.name if project else slug,
-            tiles=flow_tiles(
-                flow.report, sum(move.count for move in flow.report.back_moves.moves)
-            ),
+            tiles=flow_tiles(flow.report),
             breakdown=[direction_row(ref, item) for ref, item in zip(shown, flows, strict=True)],
             flow=flow,
         )
@@ -920,6 +918,8 @@ def add_people_list_routes(router: APIRouter) -> None:
         date_from: Annotated[date | None, Query(alias="from")] = None,
         date_to: Annotated[date | None, Query(alias="to")] = None,
         days: Days = "working",
+        include: Annotated[list[str] | None, Query()] = None,
+        exclude: Annotated[list[str] | None, Query()] = None,
     ) -> list[PersonSummary]:
         """Every member's numbers, the time each was assigned; others only with People."""
         services = services_of(request)
@@ -929,10 +929,11 @@ def add_people_list_routes(router: APIRouter) -> None:
             if context.access.allows("people", "activity") or context.access.can_manage
             else [user for user in members if user == context.viewer.user_id]
         )
+        selection = selection_of(include or [], exclude or [])
         item_ids = None
-        if context.assignee is not None:
+        if not selection.is_empty or context.assignee is not None:
             keys = await services.project_data.matching_keys(
-                slug, item_type, Selection(), assignee=context.assignee
+                slug, item_type, selection, assignee=context.assignee
             )
             item_ids = [item_id for key_type, item_id in keys or [] if key_type == item_type]
         return await services.flow_data.people_summary(
@@ -944,6 +945,21 @@ def add_people_list_routes(router: APIRouter) -> None:
             ),
             item_ids=item_ids,
         )
+
+
+def person_selection(selection: Selection, user_id: int) -> Selection:
+    """Keep card filters while focusing assigned time on the named person."""
+    return parse_selection(
+        [
+            *(
+                value
+                for value in selection_include(selection)
+                if not value.startswith("assigned:")
+            ),
+            f"assigned:{user_id}",
+        ],
+        [value for value in selection_exclude(selection) if not value.startswith("assigned:")],
+    )
 
 
 async def person_analysis(
@@ -962,17 +978,7 @@ async def person_analysis(
     profile = await services.people.profile(context.project_id, user_id)
     if profile is None:
         raise HTTPException(status_code=404, detail="Unknown person")
-    mine = parse_selection(
-        [
-            *(
-                value
-                for value in selection_include(selection)
-                if not value.startswith("assigned:")
-            ),
-            f"assigned:{user_id}",
-        ],
-        [value for value in selection_exclude(selection) if not value.startswith("assigned:")],
-    )
+    mine = person_selection(selection, user_id)
     item_ids, people = await flow_scope(
         services, slug, item_type, mine, rest=False, assignee=context.assignee
     )
@@ -981,6 +987,9 @@ async def person_analysis(
     )
     share = await services.flow_data.person_share(
         context.project_id, item_type, user_id, period=period, item_ids=item_ids, every=True
+    )
+    flow = flow.model_copy(
+        update={"report": replace(flow.report, credited_returns=tuple(share.events))}
     )
     responsible = list(
         dict.fromkeys(
@@ -994,7 +1003,7 @@ async def person_analysis(
         compared=responsible,
         subject=Subject(kind="person", id=user_id),
         name=profile.name,
-        tiles=flow_tiles(flow.report, sum(column.returns for column in share.columns)),
+        tiles=flow_tiles(flow.report, share),
         breakdown=status_rows(share.columns),
         flow=flow,
     )
@@ -1013,6 +1022,8 @@ def add_direction_summary_route(router: APIRouter) -> None:
         date_from: Annotated[date | None, Query(alias="from")] = None,
         date_to: Annotated[date | None, Query(alias="to")] = None,
         days: Days = "working",
+        include: Annotated[list[str] | None, Query()] = None,
+        exclude: Annotated[list[str] | None, Query()] = None,
     ) -> list[Row]:
         """Direction totals without requiring access to the project Overview."""
         context.require("directions")
@@ -1022,10 +1033,11 @@ def add_direction_summary_route(router: APIRouter) -> None:
             for ref in await services.flow_data.directions(context.project_id)
             if ref.columns.get(item_type)
         ]
+        selection = selection_of(include or [], exclude or [])
         item_ids = None
-        if context.assignee is not None:
+        if not selection.is_empty or context.assignee is not None:
             keys = await services.project_data.matching_keys(
-                slug, item_type, Selection(), assignee=context.assignee
+                slug, item_type, selection, assignee=context.assignee
             )
             item_ids = [id_ for kind, id_ in keys or [] if kind == item_type]
         flows = await services.flow_data.directions_flow(
@@ -1061,6 +1073,8 @@ def add_direction_routes(router: APIRouter) -> None:
         date_from: Annotated[date | None, Query(alias="from")] = None,
         date_to: Annotated[date | None, Query(alias="to")] = None,
         days: Days = "working",
+        include: Annotated[list[str] | None, Query()] = None,
+        exclude: Annotated[list[str] | None, Query()] = None,
     ) -> DirectionFlow:
         """The role's columns of one card type over the days ``from`` to ``to``."""
         context.require("directions", "overview")
@@ -1069,10 +1083,11 @@ def add_direction_routes(router: APIRouter) -> None:
         found = next((item for item in directions if item.role_id == role_id), None)
         if found is None:
             raise HTTPException(status_code=404, detail="Unknown role")
+        selection = selection_of(include or [], exclude or [])
         item_ids = None
-        if context.assignee is not None:
+        if not selection.is_empty or context.assignee is not None:
             keys = await services.project_data.matching_keys(
-                slug, item_type, Selection(), assignee=context.assignee
+                slug, item_type, selection, assignee=context.assignee
             )
             item_ids = [item_id for key_type, item_id in keys or [] if key_type == item_type]
         return await services.flow_data.direction(
@@ -1092,6 +1107,9 @@ def add_direction_routes(router: APIRouter) -> None:
         slug: str,
         role: int | None,
         person: int | None,
+        *,
+        item_type: str | None,
+        selection: Selection,
     ) -> tuple[list[CardKey] | None, list[int] | None]:
         """The cards and the people an activity request covers, after the access checks."""
         if person is None:
@@ -1099,10 +1117,10 @@ def add_direction_routes(router: APIRouter) -> None:
         elif not context.may_see_person(person):
             raise HTTPException(status_code=404, detail="Unknown person")
         cards = None
-        if context.assignee is not None:
+        if not selection.is_empty or item_type is not None or context.assignee is not None:
             cards = list(
                 await services.project_data.matching_keys(
-                    slug, None, Selection(), assignee=context.assignee
+                    slug, item_type, selection, assignee=context.assignee
                 )
                 or []
             )
@@ -1110,7 +1128,8 @@ def add_direction_routes(router: APIRouter) -> None:
         if role is not None:
             directions = await services.flow_data.directions(context.project_id)
             found = next((item for item in directions if item.role_id == role), None)
-            users = found.members if found else []
+            members = found.members if found else []
+            users = members if users is None else [user for user in users if user in members]
         return cards, users
 
     @router.get("/projects/{slug}/activity", response_model=TeamActivity)
@@ -1121,6 +1140,9 @@ def add_direction_routes(router: APIRouter) -> None:
         context: Context,
         date_from: Annotated[date | None, Query(alias="from")] = None,
         date_to: Annotated[date | None, Query(alias="to")] = None,
+        item_type: ItemType | None = None,
+        include: Annotated[list[str] | None, Query()] = None,
+        exclude: Annotated[list[str] | None, Query()] = None,
         role: int | None = None,
         person: int | None = None,
     ) -> TeamActivity:
@@ -1131,7 +1153,15 @@ def add_direction_routes(router: APIRouter) -> None:
         what was done on those cards.
         """
         services = services_of(request)
-        cards, users = await activity_scope(services, context, slug, role, person)
+        cards, users = await activity_scope(
+            services,
+            context,
+            slug,
+            role,
+            person,
+            item_type=item_type,
+            selection=selection_of(include or [], exclude or []),
+        )
         period = await services.flow_data.period(context.project_id, date_from, date_to)
         calendar = await services.project_settings.calendar(context.project_id)
         return await services.people.team_activity(
@@ -1151,13 +1181,24 @@ def add_direction_routes(router: APIRouter) -> None:
         context: Context,
         date_from: Annotated[date | None, Query(alias="from")] = None,
         date_to: Annotated[date | None, Query(alias="to")] = None,
+        item_type: ItemType | None = None,
+        include: Annotated[list[str] | None, Query()] = None,
+        exclude: Annotated[list[str] | None, Query()] = None,
         role: int | None = None,
         person: int | None = None,
         kind: ActivityKind | None = None,
     ) -> TeamEvents:
         """The newest actions behind the activity counts, with who did each, same scope."""
         services = services_of(request)
-        cards, users = await activity_scope(services, context, slug, role, person)
+        cards, users = await activity_scope(
+            services,
+            context,
+            slug,
+            role,
+            person,
+            item_type=item_type,
+            selection=selection_of(include or [], exclude or []),
+        )
         period = await services.flow_data.period(context.project_id, date_from, date_to)
         calendar = await services.project_settings.calendar(context.project_id)
         return await services.people.team_events(
@@ -1193,12 +1234,26 @@ def add_people_routes(router: APIRouter) -> None:
         context: Context,
         date_from: Annotated[date | None, Query(alias="from")] = None,
         date_to: Annotated[date | None, Query(alias="to")] = None,
+        item_type: ItemType | None = None,
+        include: Annotated[list[str] | None, Query()] = None,
+        exclude: Annotated[list[str] | None, Query()] = None,
     ) -> PersonPage:
         """The person and their Team page counts over the days ``from`` to ``to``."""
         profile = await person_of(request, context, user_id)
         services = services_of(request)
         period = await services.flow_data.period(context.project_id, date_from, date_to)
-        stats = await services.team.stats(context.project_id, period.since, period.until)
+        selection = selection_of(include or [], exclude or [])
+        cards = None
+        if not selection.is_empty or item_type is not None or context.assignee is not None:
+            cards = (
+                await services.project_data.matching_keys(
+                    slug, item_type, selection, assignee=context.assignee
+                )
+                or []
+            )
+        stats = await services.team.stats(
+            context.project_id, period.since, period.until, cards=cards
+        )
         return PersonPage(
             profile=profile,
             metrics=stats.metrics,
@@ -1218,6 +1273,8 @@ def add_people_routes(router: APIRouter) -> None:
         date_from: Annotated[date | None, Query(alias="from")] = None,
         date_to: Annotated[date | None, Query(alias="to")] = None,
         days: Days = "working",
+        include: Annotated[list[str] | None, Query()] = None,
+        exclude: Annotated[list[str] | None, Query()] = None,
     ) -> FlowResponse:
         """Flow metrics of the cards of one type while the person was assigned to them.
 
@@ -1226,7 +1283,7 @@ def add_people_routes(router: APIRouter) -> None:
         """
         await person_of(request, context, user_id)
         services = services_of(request)
-        selection = selection_of([f"assigned:{user_id}"], [])
+        selection = person_selection(selection_of(include or [], exclude or []), user_id)
         keys = await services.project_data.matching_keys(
             slug, item_type, selection, assignee=context.assignee
         )
@@ -1251,14 +1308,17 @@ def add_people_routes(router: APIRouter) -> None:
         date_from: Annotated[date | None, Query(alias="from")] = None,
         date_to: Annotated[date | None, Query(alias="to")] = None,
         days: Days = "working",
+        include: Annotated[list[str] | None, Query()] = None,
+        exclude: Annotated[list[str] | None, Query()] = None,
     ) -> PersonShare:
         """The person's part of the time in each column, with its responsible roles."""
         await person_of(request, context, user_id)
         services = services_of(request)
+        selection = selection_of(include or [], exclude or [])
         item_ids = None
-        if context.assignee is not None:
+        if not selection.is_empty or context.assignee is not None:
             keys = await services.project_data.matching_keys(
-                slug, item_type, Selection(), assignee=context.assignee
+                slug, item_type, selection, assignee=context.assignee
             )
             item_ids = [item_id for key_type, item_id in keys or [] if key_type == item_type]
         return await services.flow_data.person_share(
@@ -1280,6 +1340,9 @@ def add_people_routes(router: APIRouter) -> None:
         context: Context,
         date_from: Annotated[date | None, Query(alias="from")] = None,
         date_to: Annotated[date | None, Query(alias="to")] = None,
+        item_type: ItemType | None = None,
+        include: Annotated[list[str] | None, Query()] = None,
+        exclude: Annotated[list[str] | None, Query()] = None,
     ) -> PersonActivity:
         """Everything the person did in the project, newest first, with counts per day.
 
@@ -1290,10 +1353,15 @@ def add_people_routes(router: APIRouter) -> None:
         services = services_of(request)
         period = await services.flow_data.period(context.project_id, date_from, date_to)
         calendar = await services.project_settings.calendar(context.project_id)
+        selection = selection_of(include or [], exclude or [])
         cards = None
-        if context.assignee is not None and user_id != context.viewer.user_id:
+        if (
+            not selection.is_empty
+            or item_type is not None
+            or (context.assignee is not None and user_id != context.viewer.user_id)
+        ):
             cards = await services.project_data.matching_keys(
-                slug, None, Selection(), assignee=context.assignee
+                slug, item_type, selection, assignee=context.assignee
             )
         return await services.people.activity(
             context.project_id,

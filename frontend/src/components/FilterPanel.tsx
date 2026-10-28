@@ -3,7 +3,6 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   fetchFilterPanel,
   fetchDirections,
-  fetchPeopleSummary,
   type DirectionRef,
   type FilterCategoryKey,
   type FilterPanelData,
@@ -96,23 +95,19 @@ function RolePicker({ slug, roleId }: { slug: string; roleId: number | null }) {
   );
 }
 
-function PersonPicker({
-  slug,
-  personId,
-  itemType,
-  period,
-}: {
-  slug: string;
-  personId: number | null;
-  itemType: ItemType;
-  period: Period;
-}) {
+function PersonPicker({ slug, personId }: { slug: string; personId: number | null }) {
   const [people, setPeople] = useState<{ user_id: number; name: string }[]>([]);
   useEffect(() => {
     let cancelled = false;
-    fetchPeopleSummary(slug, itemType, period)
+    fetchFilterPanel(slug, null, EMPTY_SELECTION)
       .then((next) => {
-        if (!cancelled) setPeople(next);
+        if (!cancelled)
+          setPeople(
+            next.categories
+              .find((category) => category.key === "assigned")
+              ?.values.filter((person) => /^\d+$/.test(person.value))
+              .map((person) => ({ user_id: Number(person.value), name: person.label })) ?? [],
+          );
       })
       .catch(() => {
         if (!cancelled) setPeople([]);
@@ -120,7 +115,7 @@ function PersonPicker({
     return () => {
       cancelled = true;
     };
-  }, [slug, itemType, period]);
+  }, [slug]);
   return (
     <div className="filter-person-picker">
       <span className="filter-role-label">Person</span>
@@ -300,6 +295,7 @@ export function FilterPanel({
   typeChoice,
   roleId,
   personId,
+  activityChoice,
 }: {
   slug: string;
   itemType: ItemType | null;
@@ -311,6 +307,12 @@ export function FilterPanel({
   typeChoice?: TypeChoice;
   roleId?: number | null;
   personId?: number | null;
+  activityChoice?: {
+    value: string;
+    defaultValue: string;
+    options: DropdownOption[];
+    onChange: (value: string) => void;
+  };
 }) {
   const [panel, setPanel] = useState<FilterPanelData | null>(null);
   const defaults = useDefaultPeriod(slug);
@@ -368,7 +370,8 @@ export function FilterPanel({
     Boolean(period && defaults && !samePeriod(period, defaults)) ||
     (roleId !== undefined && roleId !== null) ||
     (personId !== undefined && personId !== null) ||
-    mode !== "include";
+    mode !== "include" ||
+    Boolean(activityChoice && activityChoice.value !== activityChoice.defaultValue);
   const reset = () => {
     onChange(EMPTY_SELECTION);
     if (period && onPeriodChange) {
@@ -376,6 +379,7 @@ export function FilterPanel({
         onPeriodChange({ ...current, days: period.days }),
       );
     }
+    if (activityChoice) activityChoice.onChange(activityChoice.defaultValue);
     setMode("include");
     setOpenCategory(null);
     if (roleId !== undefined && roleId !== null) {
@@ -392,7 +396,18 @@ export function FilterPanel({
       {typeChoice && <TypePicker choice={typeChoice} />}
       {roleId !== undefined && <RolePicker slug={slug} roleId={roleId} />}
       {personId !== undefined && itemType && period && (
-        <PersonPicker slug={slug} personId={personId} itemType={itemType} period={period} />
+        <PersonPicker slug={slug} personId={personId} />
+      )}
+      {activityChoice && (
+        <div className="filter-activity-picker">
+          <span className="filter-role-label">Whose activity</span>
+          <Dropdown
+            label="Whose activity"
+            value={activityChoice.value}
+            options={activityChoice.options}
+            onChange={activityChoice.onChange}
+          />
+        </div>
       )}
       <div className="filter-reset-row">
         <button
@@ -466,6 +481,9 @@ export function FilterPanel({
                   </button>
                   {isOpen && (
                     <div className="filter-list">
+                      {category.key === "tag" && mode === "include" && (
+                        <p className="filter-summary">Cards must contain every selected tag.</p>
+                      )}
                       {category.values.length === 0 && (
                         <p className="filter-empty">Nothing to filter by</p>
                       )}
@@ -537,14 +555,7 @@ export function PeriodPanel({
       <ProjectPicker slug={slug} />
       {typeChoice && <TypePicker choice={typeChoice} />}
       {roleId !== undefined && <RolePicker slug={slug} roleId={roleId} />}
-      {personId !== undefined && typeChoice && (
-        <PersonPicker
-          slug={slug}
-          personId={personId}
-          itemType={typeChoice.value}
-          period={period}
-        />
-      )}
+      {personId !== undefined && typeChoice && <PersonPicker slug={slug} personId={personId} />}
       {activityChoice && (
         <div className="filter-activity-picker">
           <span className="filter-role-label">Whose activity</span>

@@ -949,7 +949,12 @@ class FakeTeam:
         self.periods: list[tuple[datetime | None, datetime | None]] = []
 
     async def stats(
-        self, project_id: int, since: datetime | None = None, until: datetime | None = None
+        self,
+        project_id: int,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        *,
+        cards: Collection[CardKey] | None = None,
     ) -> TeamStats:
         """Counts of ``alpha``."""
         self.periods.append((since, until))

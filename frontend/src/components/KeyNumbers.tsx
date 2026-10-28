@@ -81,6 +81,22 @@ const METRICS: Metric[] = [
     hint: "Moves classified as returns in the period; a REWORK case can contain two events. Personal numbers follow the project's attribution rule.",
     value: (tiles) => formatNumber(tiles.returns),
     raw: (tiles) => tiles.returns,
+    detail: (tiles) => `${formatNumber(tiles.returned_cards)} returned cards`,
+  },
+  {
+    count: "repeat_returns",
+    label: () => "Repeat returns",
+    hint: "Return events after each card's first return within the selected period and subject. One card returned three times contributes two repeat returns.",
+    value: (tiles) => formatNumber(tiles.repeat_returns),
+    raw: (tiles) => tiles.repeat_returns,
+    detail: (tiles) => `${formatNumber(tiles.repeated_cards)} cards returned more than once`,
+  },
+  {
+    label: () => "Repeat return rate",
+    hint: "Cards with two or more returns divided by all returned cards within the selected period and subject.",
+    value: (tiles) =>
+      tiles.repeat_rate === null ? "-" : `${Math.round(tiles.repeat_rate * 100)}%`,
+    raw: (tiles) => tiles.repeat_rate,
   },
 ];
 
@@ -130,7 +146,7 @@ export function KeyNumbers({
                   <MetricPopup
                     label={`Show ${metric.label(item.kind)} cards`}
                     className="key-number-open"
-                    content={expand(metric.count, index)}
+                    content={() => expand(metric.count!, index)}
                   >
                     <Value color={compare ? item.color : undefined}>
                       {metric.value(item.tiles, item.kind)}

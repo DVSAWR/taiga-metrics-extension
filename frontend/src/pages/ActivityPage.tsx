@@ -2,7 +2,7 @@ import { Fragment, useEffect, useState } from "react";
 
 import {
   fetchDirections,
-  fetchPeopleSummary,
+  fetchFilterPanel,
   fetchTeamActivity,
   fetchTeamEvents,
   parseSubject,
@@ -10,7 +10,8 @@ import {
   type DirectionRef,
   type Me,
   type Period,
-  type PersonSummary,
+  type FilterSelection,
+  type ItemType,
   type ProjectSummary,
   type TeamActivity,
 } from "../api";
@@ -21,11 +22,11 @@ import {
   shiftDay,
   today,
 } from "../components/ActivityMap";
-import { PeriodPanel } from "../components/FilterPanel";
+import { FilterPanel } from "../components/FilterPanel";
 import { useExclusiveMetricList } from "../components/MetricPopup";
 import { PersonLink } from "../components/PersonLink";
 import { SortTitle, sortRows, useSort } from "../components/SortTitle";
-import { usePeriod } from "../filterState";
+import { EMPTY_SELECTION, useFilterSelection, useItemType, usePeriod } from "../filterState";
 import { formatDateTime, formatNumber } from "../format";
 import { Empty, MetricCard } from "./FlowMetrics";
 import { NotFoundPage } from "./HomePage";
@@ -77,6 +78,8 @@ function Events({
   person,
   kind,
   taigaUrl,
+  selection,
+  itemType,
 }: {
   slug: string;
   project: ProjectSummary;
@@ -85,10 +88,12 @@ function Events({
   person: number | null;
   kind: ActivityKind | null;
   taigaUrl: string | null;
+  selection: FilterSelection;
+  itemType: ItemType;
 }) {
   const [events, error] = useLoaded(
-    () => fetchTeamEvents(slug, period, role, person, kind),
-    [slug, period.from, period.to, role, person, kind],
+    () => fetchTeamEvents(slug, period, role, person, kind, selection, itemType),
+    [slug, period.from, period.to, role, person, kind, selection, itemType],
   );
   const [sort, onSort] = useSort();
   if (error) {
@@ -188,6 +193,9 @@ export function ActivityPage({
 }) {
   const project = projects?.find((candidate) => candidate.slug === slug);
   const [period, setPeriod] = usePeriod(slug);
+  const types = projectTypes(project);
+  const [itemType, setItemType] = useItemType(slug, types);
+  const [selection, setSelection] = useFilterSelection(slug);
   const teamWide = project ? project.access.scope === "all" : true;
   const defaultWho = teamWide ? EVERYONE : `person:${me.id}`;
   const [who, setWho] = useState(() => readWho() || defaultWho);
@@ -195,35 +203,48 @@ export function ActivityPage({
   const [opened, setOpened] = useState<Opened | null>(null);
   const announceOpen = useExclusiveMetricList(() => setOpened(null));
   const [directions, setDirections] = useState<DirectionRef[]>([]);
-  const [people, setPeople] = useState<PersonSummary[]>([]);
+  const [people, setPeople] = useState<{ user_id: number; name: string }[]>([]);
   const subject = parseSubject(who);
   const role = subject?.kind === "role" ? subject.id : null;
   const person = subject?.kind === "person" ? subject.id : null;
   const end = period.to && period.to > today() ? period.to : today();
   const start =
     period.from && period.from < shiftDay(end, -YEAR) ? period.from : shiftDay(end, -YEAR);
-  const itemType = projectTypes(project)[0] ?? "userstory";
 
   useEffect(() => writeWho(who), [who]);
+  useEffect(() => setWho(readWho() || defaultWho), [slug]);
   useEffect(() => {
     if (!teamWide && who !== defaultWho) setWho(defaultWho);
   }, [teamWide, who, defaultWho]);
   useEffect(() => {
     setDay(null);
     setOpened(null);
-  }, [who, period.from, period.to]);
+  }, [slug, who, period.from, period.to, selection, itemType]);
   useEffect(() => {
+    let cancelled = false;
     fetchDirections(slug)
-      .then(setDirections)
-      .catch(() => setDirections([]));
-    fetchPeopleSummary(slug, itemType, period)
-      .then(setPeople)
-      .catch(() => setPeople([]));
-  }, [slug, itemType, period]);
+      .then((next) => !cancelled && setDirections(next))
+      .catch(() => !cancelled && setDirections([]));
+    fetchFilterPanel(slug, null, EMPTY_SELECTION)
+      .then(
+        (panel) =>
+          !cancelled &&
+          setPeople(
+            panel.categories
+              .find((category) => category.key === "assigned")
+              ?.values.filter((value) => /^\d+$/.test(value.value))
+              .map((value) => ({ user_id: Number(value.value), name: value.label })) ?? [],
+          ),
+      )
+      .catch(() => !cancelled && setPeople([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [slug]);
 
   const [activity, error] = useLoaded<TeamActivity>(
-    () => fetchTeamActivity(slug, { from: start, to: end }, role, person),
-    [slug, start, end, role, person],
+    () => fetchTeamActivity(slug, { from: start, to: end }, role, person, selection, itemType),
+    [slug, start, end, role, person, selection, itemType],
   );
 
   if (projects && !project) {
@@ -269,6 +290,8 @@ export function ActivityPage({
         person={target.person ?? person}
         kind={target.kind}
         taigaUrl={taigaUrl}
+        selection={selection}
+        itemType={itemType}
       />
     ) : null;
   const whoOptions = teamWide
@@ -289,8 +312,12 @@ export function ActivityPage({
     <>
       <h1>Activity</h1>
       <div className="with-filters">
-        <PeriodPanel
+        <FilterPanel
           slug={slug}
+          itemType={itemType}
+          selection={selection}
+          onChange={setSelection}
+          typeChoice={{ types, value: itemType, onChange: setItemType }}
           period={period}
           onPeriodChange={setPeriod}
           activityChoice={{

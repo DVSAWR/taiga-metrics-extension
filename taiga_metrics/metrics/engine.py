@@ -428,7 +428,11 @@ def entered_by(card: Card, interval: Interval) -> int | None:
 
 @dataclass(frozen=True)
 class FlowReport:
-    """Every flow metric of one card type."""
+    """Every flow metric of one card type.
+
+    ``credited_returns`` supplies a person's attribution-based return list separately
+    from status moves made while they were assigned.
+    """
 
     configured: bool
     missing: tuple[str, ...]
@@ -450,6 +454,7 @@ class FlowReport:
     column_cards: tuple[ColumnCard, ...] = ()
     finishes: tuple[FinishedCard, ...] = ()
     first_passes: tuple[FirstPassEvent, ...] = ()
+    credited_returns: tuple[ReturnEvent, ...] | None = None
 
 
 def intervals_of(card: Card, now: datetime) -> list[Interval]:

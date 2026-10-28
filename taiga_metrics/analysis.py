@@ -15,9 +15,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from taiga_metrics.metrics.loader import FlowResponse
+from taiga_metrics.metrics.quality import ReturnStats, return_stats
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Sequence
@@ -50,7 +51,7 @@ class Subject(BaseModel):
         return None
 
 
-class Tiles(BaseModel):
+class Tiles(ReturnStats):
     """The key numbers of a subject over the period.
 
     For a direction ``finished`` counts the cards that passed through its columns and
@@ -66,10 +67,9 @@ class Tiles(BaseModel):
     cycle_p85: float | None
     passes: int
     clean_passes: int
-    returns: int
 
 
-class Row(BaseModel):
+class Row(ReturnStats):
     """One line of the breakdown, one level down from the subject.
 
     ``statuses`` are a direction's own columns, which its cards are counted in.
@@ -78,7 +78,7 @@ class Row(BaseModel):
     kind: Literal["role", "person", "status"]
     id: int
     name: str
-    statuses: list[int] = []
+    statuses: list[int] = Field(default_factory=list)
     color: str | None = None
     member: bool | None = None
     in_now: int
@@ -88,7 +88,6 @@ class Row(BaseModel):
     share: float | None
     passes: int
     clean_passes: int
-    returns: int
 
 
 class Analysis(BaseModel):
@@ -108,7 +107,7 @@ class Analysis(BaseModel):
     compared: list[int] | None = None
 
 
-def flow_tiles(report: FlowReport, returns: int) -> Tiles:
+def flow_tiles(report: FlowReport, returned: ReturnStats | None = None) -> Tiles:
     """The key numbers of the project or of a person from their flow report."""
     return Tiles(
         in_progress=report.in_progress,
@@ -120,7 +119,9 @@ def flow_tiles(report: FlowReport, returns: int) -> Tiles:
         cycle_p85=report.cycle_time.p85,
         passes=sum(column.passes for column in report.columns),
         clean_passes=sum(column.clean_passes for column in report.columns),
-        returns=returns,
+        **(
+            returned or return_stats(event.item_id for event in report.back_moves.events)
+        ).model_dump(include=set(ReturnStats.model_fields)),
     )
 
 
@@ -136,7 +137,7 @@ def direction_tiles(direction: DirectionFlow) -> Tiles:
         cycle_p85=None,
         passes=sum(column.time.passes for column in direction.columns),
         clean_passes=sum(column.time.clean_passes for column in direction.columns),
-        returns=sum(move.count for move in direction.returned),
+        **direction.model_dump(include=set(ReturnStats.model_fields)),
     )
 
 
@@ -155,7 +156,7 @@ def direction_row(ref: DirectionRef, direction: DirectionFlow) -> Row:
         share=None,
         passes=tiles.passes,
         clean_passes=tiles.clean_passes,
-        returns=tiles.returns,
+        **tiles.model_dump(include=set(ReturnStats.model_fields)),
     )
 
 
@@ -179,7 +180,7 @@ def people_rows(
             share=person.share,
             passes=person.passes,
             clean_passes=person.clean_passes,
-            returns=person.returns,
+            **person.model_dump(include=set(ReturnStats.model_fields)),
         )
         for person in direction.people
     ]
@@ -201,7 +202,7 @@ def status_rows(columns: Sequence[ColumnShare]) -> list[Row]:
             share=column.share,
             passes=column.passes,
             clean_passes=column.clean_passes,
-            returns=column.returns,
+            **column.model_dump(include=set(ReturnStats.model_fields)),
         )
         for column in columns
     ]

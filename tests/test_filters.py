@@ -69,6 +69,21 @@ def test_categories_are_combined() -> None:
     assert ids(apply(CARDS, selection)) == [2]
 
 
+def test_every_included_tag_must_match() -> None:
+    """Additional tags narrow the same cards on every metrics page."""
+    assert ids(apply(CARDS, parse_selection(["tag:api", "tag:ui"], []))) == [2]
+    assert apply(CARDS, parse_selection(["tag:api", "tag:missing"], [])) == []
+    assert apply(CARDS, parse_selection(["tag:api", "tag:none"], [])) == []
+    assert ids(apply(CARDS, parse_selection(["tag:none"], []))) == [3, 4]
+    assert apply(CARDS, parse_selection(["tag:api", "tag:ui"], ["assigned:6"])) == []
+
+
+def test_tag_counts_show_the_intersection_with_selected_tags() -> None:
+    """Tag counters describe cards containing every already selected tag."""
+    counts = facet_counts(CARDS, parse_selection(["tag:ui"], []))
+    assert counts["tag"] == {"api": 1, "ui": 1}
+
+
 def test_any_excluded_value_removes_a_card() -> None:
     """Excluding an assignee removes shared cards too."""
     selection = parse_selection([], ["assigned:6"])

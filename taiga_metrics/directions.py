@@ -12,7 +12,7 @@ from collections import Counter, defaultdict
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from taiga_metrics.metrics.calendar import percentile
 from taiga_metrics.metrics.engine import (
@@ -22,6 +22,7 @@ from taiga_metrics.metrics.engine import (
     intervals_of,
     stays_of,
 )
+from taiga_metrics.metrics.quality import ReturnStats, return_stats
 from taiga_metrics.metrics.returns import first_passes, returns_of
 
 if TYPE_CHECKING:
@@ -38,7 +39,7 @@ class DirectionColumn(BaseModel):
     wip_limit: int | None
 
 
-class DirectionPerson(BaseModel):
+class DirectionPerson(ReturnStats):
     """What one person closed of the direction's stays that ended in the period.
 
     ``passes`` are the first passes of its columns they authored in the period and
@@ -54,10 +55,9 @@ class DirectionPerson(BaseModel):
     p50: float | None
     passes: int = 0
     clean_passes: int = 0
-    returns: int = 0
 
 
-class DirectionFlow(BaseModel):
+class DirectionFlow(ReturnStats):
     """The direction's columns of one card type: load now, flow through, and people.
 
     ``passed`` counts the cards that left one of its columns in the period, each once;
@@ -78,7 +78,7 @@ class DirectionFlow(BaseModel):
     p85: float | None = None
     people: list[DirectionPerson]
     names: dict[int, str]
-    usernames: dict[int, str] = {}
+    usernames: dict[int, str] = Field(default_factory=dict)
 
 
 class DirectionRef(BaseModel):
@@ -123,7 +123,7 @@ def people_quality(
     columns: Sequence[Column],
     options: FlowOptions,
     statuses: Collection[int],
-) -> tuple[Counter[int | None], Counter[int | None], Counter[int]]:
+) -> tuple[Counter[int | None], Counter[int | None], dict[int, ReturnStats]]:
     """Per person, first passes of ``statuses`` authored, clean ones, and returns credited."""
     by_id = {column.status_id: column for column in columns}
     rework = {
@@ -133,7 +133,7 @@ def people_quality(
     }
     passes: Counter[int | None] = Counter()
     clean: Counter[int | None] = Counter()
-    returns: Counter[int] = Counter()
+    returns: dict[int, list[int]] = defaultdict(list)
     for card in cards:
         intervals = intervals_of(card, options.now)
         found = returns_of(
@@ -145,12 +145,13 @@ def people_quality(
                 and item.to_status not in rework
                 and ended_in(item.happened_at, options)
             ):
-                returns.update(item.credited)
+                for user in item.credited:
+                    returns[user].append(card.item_id)
         for first in first_passes(intervals, found, options.misclick, options.returns.pauses):
             if first.status_id in statuses and ended_in(first.passed_at, options):
                 passes[first.author] += 1
                 clean[first.author] += first.clean
-    return passes, clean, returns
+    return passes, clean, {user: return_stats(ids) for user, ids in returns.items()}
 
 
 def direction_flow(
@@ -197,11 +198,16 @@ def direction_flow(
             p50=percentile(closed.get(user, []), 0.5),
             passes=passes[user],
             clean_passes=clean[user],
-            returns=credited[user],
+            **credited.get(user, ReturnStats()).model_dump(),
         )
         for user in people_ids
     ]
     return DirectionFlow(
+        **return_stats(
+            event.item_id
+            for event in report.back_moves.events
+            if event.credited_status in wanted and event.to_status not in rework
+        ).model_dump(),
         columns=shown,
         in_now=sum(column.time.in_column_now for column in shown),
         stuck=[card for card in report.stuck if card.status_id in wanted and card.level],

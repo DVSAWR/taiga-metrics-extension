@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time, timedelta
+
+import pytest
 
 from taiga_metrics.metrics.calendar import WorkCalendar, percentile
 
@@ -47,3 +49,31 @@ def test_percentiles_use_the_nearest_rank() -> None:
     assert percentile([10], 0.85) == 10
     assert percentile([1, 2, 3], 0) == 1
     assert percentile([], 0.5) is None
+
+
+@pytest.mark.parametrize("zone", ["UTC", "Europe/Moscow", "Europe/Berlin", "America/New_York"])
+@pytest.mark.parametrize(
+    "weekdays", [frozenset(), frozenset({1, 3, 7}), frozenset({1, 2, 3, 4, 5})]
+)
+def test_working_day_arithmetic_preserves_day_boundary_semantics(
+    zone: str, weekdays: frozenset[int]
+) -> None:
+    """Whole weeks, leap years, DST changes and partial days agree with daily integration."""
+    calendar = WorkCalendar(zone, weekdays)
+    start = datetime(2024, 2, 28, 17, 23, tzinfo=UTC)
+    for duration in (0, 0.2, 1, 6, 7, 8, 40, 250, 400, 1000):
+        end = start + timedelta(days=duration)
+        local_start = start.astimezone(calendar.zone)
+        local_end = end.astimezone(calendar.zone)
+        day = local_start.date()
+        seconds = 0.0
+        while day <= local_end.date():
+            if day.isoweekday() in weekdays:
+                left = max(local_start, datetime.combine(day, time.min, calendar.zone))
+                right = min(
+                    local_end, datetime.combine(day + timedelta(days=1), time.min, calendar.zone)
+                )
+                seconds += max(0, (right - left).total_seconds())
+            day += timedelta(days=1)
+        assert calendar.days_between(start, end, working=True) == pytest.approx(seconds / 86400)
+    assert calendar.days_between(start, start - timedelta(days=1), working=True) == 0

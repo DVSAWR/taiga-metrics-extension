@@ -52,6 +52,8 @@ function useColumnFlow(slug: string, itemType: ItemType | null, column: number |
       return;
     }
     let cancelled = false;
+    setFlow(null);
+    setError(null);
     fetchFlow(slug, itemType, selection, period, column)
       .then((next) => {
         if (!cancelled) {

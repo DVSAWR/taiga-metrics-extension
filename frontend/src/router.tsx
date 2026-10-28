@@ -1,4 +1,4 @@
-import { useEffect, useState, type AnchorHTMLAttributes, type MouseEvent } from "react";
+import { useSyncExternalStore, type AnchorHTMLAttributes, type MouseEvent } from "react";
 
 import type { ItemType, Module } from "./api";
 import { MODULE_INFO, MODULE_OF_TYPE } from "./modules";
@@ -9,7 +9,7 @@ export function navigate(to: string, replace = false): void {
   if (document.activeElement instanceof HTMLElement) {
     document.activeElement.blur();
   }
-  if (to !== window.location.pathname) {
+  if (to !== `${window.location.pathname}${window.location.search}${window.location.hash}`) {
     if (replace) {
       window.history.replaceState(null, "", to);
     } else {
@@ -19,18 +19,17 @@ export function navigate(to: string, replace = false): void {
   }
 }
 
+function subscribePath(update: () => void): () => void {
+  window.addEventListener("popstate", update);
+  window.addEventListener(NAVIGATION_EVENT, update);
+  return () => {
+    window.removeEventListener("popstate", update);
+    window.removeEventListener(NAVIGATION_EVENT, update);
+  };
+}
+
 export function usePath(): string {
-  const [path, setPath] = useState(window.location.pathname);
-  useEffect(() => {
-    const update = () => setPath(window.location.pathname);
-    window.addEventListener("popstate", update);
-    window.addEventListener(NAVIGATION_EVENT, update);
-    return () => {
-      window.removeEventListener("popstate", update);
-      window.removeEventListener(NAVIGATION_EVENT, update);
-    };
-  }, []);
-  return path;
+  return useSyncExternalStore(subscribePath, () => window.location.pathname);
 }
 
 interface LinkProps extends AnchorHTMLAttributes<HTMLAnchorElement> {

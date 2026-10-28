@@ -1,7 +1,8 @@
 """Card filters in the format of Taiga's board filters.
 
 A selection holds, per category, values to include and values to exclude. Included
-values of one category are alternatives; categories are combined; any excluded value
+values of one category are alternatives, except tags, which must all match;
+categories are combined; any excluded value
 removes a card. Each category reports how many cards carry each of its values among
 the cards matching every other category, which is what the counters in the panel show.
 
@@ -140,7 +141,9 @@ def matches(card: CardFacts, selection: Selection, skip: Category | None = None)
         if category == skip:
             continue
         values = values_of(card, category)
-        if part.include and not values & part.include:
+        if part.include and not (
+            part.include <= values if category == "tag" else values & part.include
+        ):
             return False
         if values & part.exclude:
             return False
@@ -158,11 +161,13 @@ def facet_counts(cards: Iterable[CardFacts], selection: Selection) -> dict[Categ
     Deleted cards are left out of the counters; they no longer exist on Taiga's board.
     """
     listed = [card for card in cards if not card.is_deleted]
+    tags = selection.categories.get("tag", CategorySelection()).include
     return {
         category: Counter(
             value
             for card in listed
             if matches(card, selection, skip=category)
+            if category != "tag" or tags <= values_of(card, "tag")
             for value in values_of(card, category)
         )
         for category in CATEGORIES

@@ -5,8 +5,10 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+import pytest
+
 from taiga_metrics.comments import CardComment, CardComments, history_key
-from taiga_metrics.filters import AssignmentFilter
+from taiga_metrics.filters import AssignmentFilter, CardFacts, apply
 from tests.conftest import HEADERS
 from tests.fakes import FakeComments, FakeFlowData
 
@@ -14,6 +16,7 @@ if TYPE_CHECKING:
     from fastapi.testclient import TestClient
 
     from taiga_metrics.api.app import Services
+    from taiga_metrics.filters import Selection
 
 
 def last_request(services: Services) -> dict[str, object]:
@@ -64,6 +67,53 @@ def test_filters_narrow_the_cards(client: TestClient, services: Services) -> Non
     """Only cards passing the filters are measured."""
     client.get("/api/projects/alpha/flow", params=[("include", "assigned:6")])
     assert last_request(services)["item_ids"] == [3]
+
+
+@pytest.mark.parametrize(
+    ("path", "extra"),
+    [
+        ("flow", []),
+        ("analysis", []),
+        ("scrum/status-times", []),
+        ("scrum/stays", [("key", "sprint-1"), ("status_id", "1")]),
+        ("scrum/finished", [("key", "sprint-1")]),
+    ],
+)
+def test_metrics_endpoints_preserve_all_selected_tags(
+    client: TestClient,
+    services: Services,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    extra: list[tuple[str, str]],
+) -> None:
+    """Overview, status durations and Done drilldowns all receive the same tag intersection."""
+    requested: list[Selection] = []
+
+    async def matching_keys(
+        slug: str, item_type: str | None, selection: Selection, *, assignee: int | None = None
+    ) -> list[tuple[str, int]]:
+        requested.append(selection)
+        cards = [
+            CardFacts(
+                "userstory", item_id, frozenset(), frozenset(), None, frozenset(), frozenset(tags)
+            )
+            for item_id, tags in ((3, ("ux", "frontend")), (4, ("ux",)), (5, ("backend",)))
+        ]
+        return [(card.item_type, card.item_id) for card in apply(cards, selection)]
+
+    monkeypatch.setattr(services.project_data, "matching_keys", matching_keys)
+    response = client.get(
+        f"/api/projects/alpha/{path}",
+        params=[("include", "tag:ux"), ("include", "tag:frontend"), *extra],
+    )
+    assert response.status_code == 200
+    assert requested
+    assert all(
+        selection.categories["tag"].include == {"ux", "frontend"} for selection in requested
+    )
+    flow = services.flow_data
+    assert isinstance(flow, FakeFlowData)
+    assert all(request["item_ids"] == [3] for request in flow.requests if "item_ids" in request)
 
 
 def test_own_scope_measures_only_own_cards(
