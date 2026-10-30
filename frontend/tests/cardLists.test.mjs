@@ -72,3 +72,28 @@ test("personal status drilldowns retain credited triage events while roles exclu
   assert.equal(rowCards(flow, null, row, "repeat_returns", 6).returns.length, 1);
   assert.equal(subjectCards(flow, [2], "returns").returns.length, 0);
 });
+
+test("stuck drilldowns retain age reasons and cumulative time after a status reentry", () => {
+  const flow = report([]);
+  flow.stuck = [
+    {
+      item_id: 1,
+      ref: 1,
+      status_id: 2,
+      level: "red",
+      days_in_column: 1,
+      days_in_status: 60,
+      age_days: 77,
+      assignees: [6],
+    },
+  ];
+  const opened = subjectCards(flow, null, "stuck");
+  assert.equal(opened.timeLabel, "Total in status");
+  assert.equal(opened.cards[0].days, 60);
+  assert.equal(opened.cards[0].aging.age_days, 77);
+  assert.equal(
+    rowCards(flow, [2], { kind: "person", id: 6, name: "Person" }, "stuck").cards.length,
+    1,
+  );
+  assert.equal(subjectCards(flow, [3], "stuck").cards.length, 0);
+});

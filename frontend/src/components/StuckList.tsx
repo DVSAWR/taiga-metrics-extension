@@ -2,7 +2,8 @@ import type { ColumnTime, ItemType, StuckCard } from "../api";
 import { formatDuration } from "../charts/format";
 import { CardLink } from "./CardLink";
 import { CardRef } from "./CardRef";
-import { PeopleRefs, type Directory } from "./PersonLink";
+import { PeopleRefs, PersonRef, type Directory } from "./PersonLink";
+import { AgingBadges } from "./AgingBadges";
 import { StatusName } from "./StatusName";
 import { SortTitle, sortRows, useSort } from "./SortTitle";
 
@@ -14,6 +15,7 @@ export function StuckList({
   directory,
   taigaUrl,
   showIdle = true,
+  showCreatedBy = false,
 }: {
   slug: string;
   itemType: ItemType;
@@ -22,6 +24,7 @@ export function StuckList({
   directory: Directory;
   taigaUrl: string | null;
   showIdle?: boolean;
+  showCreatedBy?: boolean;
 }) {
   const [sort, onSort] = useSort();
   const columns = new Map(statuses.map((column) => [column.status_id, column]));
@@ -36,14 +39,23 @@ export function StuckList({
             <th>
               <SortTitle label="Status" sortKey="status" sort={sort} onSort={onSort} />
             </th>
-            <th className="num" title="How long the card has been in its status">
-              <SortTitle label="In the status" sortKey="days" sort={sort} onSort={onSort} />
+            <th
+              className="num"
+              title="Time since creation, compared with completed card ages across the whole project history"
+            >
+              <SortTitle label="Age" sortKey="age" sort={sort} onSort={onSort} />
             </th>
-            <th className="num" title="85% of the past stays in the status were shorter">
-              <SortTitle label="Usually within" sortKey="usual" sort={sort} onSort={onSort} />
+            <th
+              className="num"
+              title="All visits to this status added together, compared with completed per-card totals across the whole project history"
+            >
+              <SortTitle label="Total in status" sortKey="days" sort={sort} onSort={onSort} />
+            </th>
+            <th className="num" title="Time since the latest entry into this status">
+              <SortTitle label="Current stay" sortKey="stay" sort={sort} onSort={onSort} />
             </th>
             <th>
-              <SortTitle label="Level" sortKey="level" sort={sort} onSort={onSort} />
+              <SortTitle label="Overdue by" sortKey="level" sort={sort} onSort={onSort} />
             </th>
             {showIdle && (
               <th
@@ -56,6 +68,7 @@ export function StuckList({
             <th>
               <SortTitle label="Assigned" sortKey="assigned" sort={sort} onSort={onSort} />
             </th>
+            {showCreatedBy && <th>Created by</th>}
           </tr>
         </thead>
         <tbody>
@@ -65,14 +78,16 @@ export function StuckList({
               : key === "status"
                 ? columns.get(card.status_id)?.name ?? ""
                 : key === "days"
-                  ? card.days_in_column
-                  : key === "usual"
-                    ? card.p85
-                    : key === "level"
-                      ? card.level
-                      : key === "idle"
-                        ? card.days_idle
-                        : card.assignees.length,
+                  ? card.days_in_status
+                  : key === "age"
+                    ? card.age_days
+                    : key === "stay"
+                      ? card.days_in_column
+                      : key === "level"
+                        ? card.level
+                        : key === "idle"
+                          ? card.days_idle
+                          : card.assignees.length,
           ).map((card) => {
             const column = columns.get(card.status_id);
             return (
@@ -102,24 +117,33 @@ export function StuckList({
                     color={column?.color ?? null}
                   />
                 </td>
-                <td className="num">{formatDuration(card.days_in_column)}</td>
-                <td className="num">{formatDuration(card.p85)}</td>
-                <td className="stuck-level-cell">
-                  <span
-                    className={`badge ${
-                      card.level === "red" ? "badge-accent-strong" : "badge-accent"
-                    }`}
-                    title={`85% of past stays within ${formatDuration(
-                      card.p85,
-                    )}, 95% within ${formatDuration(card.p95)}`}
-                  >
-                    {card.level === "red" ? "Much slower" : "Slower"}
+                <td className="num">
+                  {formatDuration(card.calendar_age_days)}
+                  {card.age_days !== card.calendar_age_days && (
+                    <span className="aging-baseline">{formatDuration(card.age_days)} working</span>
+                  )}
+                  <span className="aging-baseline">
+                    Usually {formatDuration(card.age_p85)}
+                    {card.age_days !== card.calendar_age_days ? " working" : ""}
                   </span>
+                </td>
+                <td className="num">
+                  {formatDuration(card.days_in_status)}
+                  <span className="aging-baseline">Usually {formatDuration(card.p85)}</span>
+                </td>
+                <td className="num">{formatDuration(card.days_in_column)}</td>
+                <td className="stuck-level-cell">
+                  <AgingBadges card={card} />
                 </td>
                 {showIdle && <td className="num">{formatDuration(card.days_idle)}</td>}
                 <td className="stuck-assigned-cell">
                   <PeopleRefs directory={directory} ids={card.assignees} nobody="Unassigned" />
                 </td>
+                {showCreatedBy && (
+                  <td>
+                    <PersonRef directory={directory} id={card.created_by} nobody="Unknown" />
+                  </td>
+                )}
               </tr>
             );
           })}

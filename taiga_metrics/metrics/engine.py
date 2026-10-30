@@ -11,8 +11,8 @@ columns keeps it finished. Filing a cancelled card into Done (archiving a reject
 one) is not finishing it. Lead time runs from creation, cycle time from the first
 entry into a Work column, both to the last such finish.
 
-A stay shorter than a misclick (5 minutes) is a card passing through a column, not
-work done there: it is left out of the column's usual times and is never unusual.
+A stay shorter than a misclick (5 minutes) is left out of historical status
+baselines. Aging compares cumulative status time and creation age independently.
 
 When the filters name people or roles, only the part of a card's life while such
 people were assigned counts: time in a column is cut to those stretches, and a move
@@ -92,6 +92,7 @@ class Card:
     last_activity: datetime | None = None
     assignments: tuple[tuple[datetime, frozenset[int]], ...] = ()
     owner_id: int | None = None
+    activity: tuple[datetime, ...] | None = None
 
     def assigned_at(self, moment: datetime) -> frozenset[int]:
         """Who was assigned at ``moment``, changes made at that very moment included."""
@@ -142,8 +143,8 @@ class FlowOptions:
     The period runs from ``since`` up to ``until``, either end open when ``None``.
     ``people`` narrows everything to the stretches when the right people were
     assigned; ``roles_of`` gives each member's role for it. ``column`` asks for the
-    cards standing in that column right now. ``usual`` is the yardstick of what is stuck
-    now, per column; without it the report's own stays are used.
+    cards standing in that column right now. ``aging`` provides project-wide
+    thresholds for cumulative status time and age; otherwise all supplied cards set them.
     """
 
     now: datetime
@@ -154,7 +155,8 @@ class FlowOptions:
     people: AssignmentFilter | None = None
     roles_of: Mapping[int, int | None] = field(default_factory=dict)
     column: int | None = None
-    usual: Mapping[int, StayTime] | None = None
+    aging: AgingThresholds | None = None
+    aging_at_end: AgingThresholds | None = None
     returns: ReturnRules = field(default_factory=ReturnRules)
 
     @property
@@ -383,7 +385,11 @@ class PersonMoves:
 
 @dataclass(frozen=True)
 class StuckCard:
-    """An unfinished card and how long it has been where it is."""
+    """A card's age, cumulative status time, current stay and inactivity.
+
+    Aging describes the whole card, independently of who is viewing it. People
+    filters select current assignees without resetting its age or previous visits.
+    """
 
     item_id: int
     ref: int | None
@@ -396,6 +402,21 @@ class StuckCard:
     p95: float | None
     assignees: frozenset[int]
     created_by: int | None = None
+    days_in_status: float = 0.0
+    age_days: float | None = None
+    age_p85: float | None = None
+    age_p95: float | None = None
+    status_level: str | None = None
+    age_level: str | None = None
+    calendar_age_days: float | None = None
+
+
+@dataclass(frozen=True)
+class AgingThresholds:
+    """Whole-history cumulative status times and completed card ages."""
+
+    statuses: Mapping[int, StayTime]
+    age: StayTime
 
 
 @dataclass(frozen=True)
@@ -807,6 +828,42 @@ def assigned_now(card: Card, options: FlowOptions) -> bool:
     return options.people is None or options.people.takes(card.assignees, options.roles_of)
 
 
+def last_activity_as_of(card: Card, moment: datetime) -> datetime | None:
+    """Latest known activity at or before a moment, including creation and assignments."""
+    moments = (
+        list(card.activity)
+        if card.activity is not None
+        else [
+            *(step.happened_at for step in card.steps),
+            *(when for when, _ in card.assignments),
+        ]
+    )
+    moments.extend(value for value in (card.created_at, card.last_activity) if value is not None)
+    return max((value for value in moments if value <= moment), default=None)
+
+
+def aging_level(days: float | None, p85: float | None, p95: float | None) -> str | None:
+    """Whether an observed duration exceeds either historical aging threshold."""
+    if days is not None:
+        if p95 is not None and days > p95:
+            return "red"
+        if p85 is not None and days > p85:
+            return "yellow"
+    return None
+
+
+def card_age(card: Card, calendars: Calendars, options: FlowOptions) -> float | None:
+    """Age from creation, using the project calendar consistently for every card."""
+    created = card.created_at or next(
+        (step.happened_at for step in card.steps if step.kind == "create"), None
+    )
+    return (
+        calendars.project.days_between(created, options.now, working=options.working_days)
+        if created is not None
+        else None
+    )
+
+
 def finish_samples(
     card: Card,
     intervals: Sequence[Interval],
@@ -843,21 +900,19 @@ def finish_samples(
 def stuck_cards(
     open_stays: Sequence[tuple[Card, Interval, float]],
     types: Mapping[int, ColumnType | None],
-    thresholds: Mapping[int, StayTime],
+    thresholds: AgingThresholds,
     calendars: Calendars,
     options: FlowOptions,
     *,
     column: int | None = None,
 ) -> tuple[StuckCard, ...]:
-    """Unfinished cards against the p85 and p95 of single stays there, most stuck first.
+    """Work cards overdue by their cumulative status time or age since creation.
 
-    Every card in a Queue, Work, or untyped column is listed, but only one in a Work
-    column can be stuck: waiting in a queue longer than usual is not work standing
-    still. With ``column``, every card standing in that column, whatever its type, each
-    judged against the column's own stays.
+    Each comparison needs at least three completed observations of the same measure.
+    Current stays and inactivity are shown separately and do not reset earlier work.
     """
     stuck = []
-    for card, interval, days in open_stays:
+    for card, interval, _ in open_stays:
         wanted = (
             interval.status_id == column
             if column is not None
@@ -865,17 +920,30 @@ def stuck_cards(
         )
         if not wanted or not assigned_now(card, options):
             continue
-        judged = column is not None or types.get(interval.status_id) in IN_PROGRESS_TYPES
-        limits = thresholds.get(interval.status_id) if judged else None
+        judged = types.get(interval.status_id) in IN_PROGRESS_TYPES
+        limits = thresholds.statuses.get(interval.status_id) if judged else None
         enough = limits is not None and limits.stays >= MIN_SAMPLES_FOR_AGING
         p85 = limits.p85 if limits and enough else None
         p95 = limits.p95 if limits and enough else None
-        level = None
-        if p95 is not None and days > p95:
-            level = "red"
-        elif p85 is not None and days > p85:
-            level = "yellow"
-        idle_since = card.last_activity
+        intervals = intervals_of(card, options.now)
+        days = interval_days(interval, card, calendars, options)
+        cumulative = sum(
+            interval_days(stay, card, calendars, options)
+            for stay in intervals
+            if stay.status_id == interval.status_id
+        )
+        age = card_age(card, calendars, options)
+        age_limits = (
+            thresholds.age if judged and thresholds.age.stays >= MIN_SAMPLES_FOR_AGING else None
+        )
+        age_p85 = age_limits.p85 if age_limits else None
+        age_p95 = age_limits.p95 if age_limits else None
+        status_level = aging_level(cumulative, p85, p95)
+        age_level = aging_level(age, age_p85, age_p95)
+        level = next(
+            (value for value in ("red", "yellow") if value in (status_level, age_level)), None
+        )
+        idle_since = last_activity_as_of(card, options.now)
         if options.people is not None:
             windows = assignment_windows(card, options)
             current_window = next(
@@ -904,10 +972,17 @@ def stuck_cards(
                 p95,
                 card.assignees,
                 card.owner_id,
+                cumulative,
+                age,
+                age_p85,
+                age_p95,
+                status_level,
+                age_level,
+                card_age(card, calendars, replace(options, working_days=False)),
             )
         )
     stuck.sort(
-        key=lambda item: (item.level != "red", item.level != "yellow", -item.days_in_column)
+        key=lambda item: (item.level != "red", item.level != "yellow", -item.days_in_status)
     )
     return tuple(stuck)
 
@@ -1122,8 +1197,8 @@ def usual_stays(
 ) -> dict[int, StayTime]:
     """Every finished stay of the cards, whole history and whoever was assigned, per column.
 
-    This is the yardstick of what is stuck now: it does not move with the period or
-    the filters. Stays shorter than the misclick threshold only passed through.
+    This is the yardstick for individual stays in card and transition histories.
+    Stays shorter than the misclick threshold only passed through.
     """
     per_stay: dict[int, list[float]] = defaultdict(list)
     for card in cards:
@@ -1133,6 +1208,41 @@ def usual_stays(
                     interval_days(interval, card, calendars, options)
                 )
     return {status_id: stay_time(status_id, values) for status_id, values in per_stay.items()}
+
+
+def aging_thresholds(
+    cards: Sequence[Card],
+    types: Mapping[int, ColumnType | None],
+    calendars: Calendars,
+    options: FlowOptions,
+) -> AgingThresholds:
+    """Completed per-card status totals and ages, unaffected by report filters.
+
+    A card still in a status does not set its own threshold for that status. Earlier
+    visits are added together for each other card, with one observation per card.
+    """
+    per_status: dict[int, list[float]] = defaultdict(list)
+    ages: list[float] = []
+    whole = replace(options, since=None, until=None, people=None)
+    for card in cards:
+        totals: dict[int, float] = defaultdict(float)
+        for interval in intervals_of(card, whole.now):
+            if interval.end is not None and interval.end - interval.start >= whole.misclick:
+                totals[interval.status_id] += interval_days(interval, card, calendars, whole)
+        for status_id, days in totals.items():
+            if card.is_deleted or card.status_id != status_id:
+                per_status[status_id].append(days)
+        finished = finish_time(card, types, as_of=whole.now)
+        if not card.is_deleted and finished is not None:
+            age = card_age(card, calendars, replace(whole, now=finished))
+            if age is not None:
+                ages.append(age)
+    return AgingThresholds(
+        statuses={
+            status_id: stay_time(status_id, values) for status_id, values in per_status.items()
+        },
+        age=stay_time(-1, ages),
+    )
 
 
 def card_as_of(card: Card, moment: datetime) -> Card | None:
@@ -1150,13 +1260,30 @@ def card_as_of(card: Card, moment: datetime) -> Card | None:
         is_deleted=any(step.kind == "delete" for step in steps),
         assignees=card.assigned_at(moment),
         assignments=tuple(item for item in card.assignments if item[0] <= moment),
+        last_activity=last_activity_as_of(card, moment),
+        activity=tuple(value for value in card.activity if value <= moment)
+        if card.activity is not None
+        else None,
     )
+
+
+def aging_as_of(
+    cards: Sequence[Card],
+    types: Mapping[int, ColumnType | None],
+    calendars: Calendars,
+    options: FlowOptions,
+) -> AgingThresholds:
+    """Historical baselines using only cards and completed work known at period end."""
+    snapshots = [
+        snapshot for card in cards if (snapshot := card_as_of(card, options.end)) is not None
+    ]
+    return aging_thresholds(snapshots, types, calendars, replace(options, now=options.end))
 
 
 def stuck_as_of(
     cards: Sequence[Card],
     types: Mapping[int, ColumnType | None],
-    thresholds: Mapping[int, StayTime],
+    thresholds: AgingThresholds,
     calendars: Calendars,
     options: FlowOptions,
 ) -> tuple[StuckCard, ...]:
@@ -1180,7 +1307,12 @@ def stuck_as_of(
             open_stays.append(
                 (card, interval, interval_days(interval, card, calendars, then, windows))
             )
-    return stuck_cards(open_stays, types, thresholds, calendars, then)
+    historical = (
+        thresholds
+        if end == options.now
+        else options.aging_at_end or aging_as_of(cards, types, calendars, options)
+    )
+    return stuck_cards(open_stays, types, historical, calendars, then)
 
 
 def compute_flow(
@@ -1312,11 +1444,7 @@ def compute_flow(
         if not column.is_deleted or used(column.status_id)
     )
     stay_times = tuple(stay_time(status_id, values) for status_id, values in per_stay.items())
-    thresholds = (
-        options.usual
-        if options.usual is not None
-        else {time.status_id: time for time in stay_times}
-    )
+    thresholds = options.aging or aging_thresholds(cards, types, calendars, options)
     moves, moves_by_assignee, moves_by_mover = column_moves(cards, options)
 
     return FlowReport(

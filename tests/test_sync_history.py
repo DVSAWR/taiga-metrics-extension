@@ -5,8 +5,11 @@ The entries mirror real rows observed in Taiga 6.9's ``history_historyentry``.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
+
+import pytest
 
 from taiga_metrics.sync.history import (
     CHANGE,
@@ -162,3 +165,29 @@ def test_json_is_decoded_from_text_or_kept() -> None:
     assert decode_json('{"status": [1, 2]}') == {"status": [1, 2]}
     assert decode_json({"status": [1, 2]}) == {"status": [1, 2]}
     assert decode_json(None) is None
+
+
+@pytest.mark.parametrize(
+    "diff,commented,deleted,hidden,expected",
+    [
+        ({"subject": ["old", "new"]}, False, False, False, True),
+        ({}, True, False, False, True),
+        ({}, True, True, False, False),
+        ({"subject": ["old", "new"]}, True, True, False, True),
+        ({"kanban_order": [1, 2]}, False, False, False, False),
+        ({"kanban_order": [1, 2]}, True, False, False, True),
+        ({"status": [1, 2]}, False, False, True, False),
+        ({}, False, False, False, False),
+    ],
+)
+def test_activity_counts_comments_and_edits_but_ignores_hidden_order_changes(
+    diff: dict[str, Any], commented: bool, deleted: bool, hidden: bool, expected: bool
+) -> None:
+    """Idle uses the same visible activity definition as the activity feed."""
+    value = replace(
+        entry("tasks.task:1", CHANGE, diff=diff),
+        commented=commented,
+        comment_deleted=deleted,
+        is_hidden=hidden,
+    )
+    assert value.is_activity is expected

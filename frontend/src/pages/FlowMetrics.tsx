@@ -4,6 +4,7 @@ import type {
   ColumnCard,
   Distribution,
   FlowResponse,
+  FlowReport,
   ItemType,
   MoveCount,
   MoveEvent,
@@ -27,6 +28,7 @@ import {
 } from "../charts/timeAxis";
 import { fillWidth, formatDuration } from "../charts/format";
 import { CardTitle } from "../components/CardTitle";
+import { AgingBadges } from "../components/AgingBadges";
 import { MetricPopup, useExclusiveMetricList } from "../components/MetricPopup";
 import { FirstPassList, ReturnEventList } from "../components/QualityLists";
 import { PeopleRefs, PersonRef } from "../components/PersonLink";
@@ -2139,6 +2141,7 @@ export interface ListedCard {
   days: number | null;
   assignees: number[];
   is_deleted?: boolean;
+  aging?: FlowReport["stuck"][number];
 }
 
 export function CardsBreakdown({
@@ -2189,6 +2192,7 @@ export function CardsBreakdown({
             ? peopleText(flow, card.assignees)
             : card.days,
   );
+  const showAging = cards.some((card) => card.aging);
   const title = (label: string, key: string) => (
     <SortTitle label={label} sortKey={key} sort={sort} onSort={onSort} className="table-sort" />
   );
@@ -2204,6 +2208,8 @@ export function CardsBreakdown({
             <th>{title("Card", "card")}</th>
             <th>{title("Status", "status")}</th>
             <th className="num">{title(timeLabel, "time")}</th>
+            {showAging && <th className="num">Age</th>}
+            {showAging && <th>Overdue by</th>}
             <th>{title("Assigned", "assigned")}</th>
           </tr>
         </thead>
@@ -2234,6 +2240,10 @@ export function CardsBreakdown({
                 )}
               </td>
               <td className="num">{formatDuration(card.days)}</td>
+              {showAging && (
+                <td className="num">{formatDuration(card.aging?.calendar_age_days ?? null)}</td>
+              )}
+              {showAging && <td>{card.aging && <AgingBadges card={card.aging} />}</td>}
               <td>
                 <PeopleRefs directory={flow} ids={card.assignees} nobody="Unassigned" />
               </td>

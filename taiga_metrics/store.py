@@ -135,6 +135,17 @@ transition = sa.Table(
     sa.Column("to_status_name", sa.Text),
 )
 
+card_activity = sa.Table(
+    "card_activity",
+    metadata,
+    sa.Column("history_id", sa.Text, primary_key=True),
+    sa.Column("item_type", sa.Text),
+    sa.Column("item_id", sa.Integer),
+    sa.Column("project_id", sa.Integer),
+    sa.Column("happened_at", TIMESTAMP),
+    sa.Column("is_activity", sa.Boolean),
+)
+
 assignment = sa.Table(
     "assignment",
     metadata,

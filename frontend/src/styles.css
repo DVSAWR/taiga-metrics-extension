@@ -1875,6 +1875,19 @@ button:disabled {
   table-layout: auto;
 }
 
+.aging-baseline {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.aging-badges {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.25rem;
+}
+
 .stuck-list-table td:not(.stuck-card-cell, .stuck-assigned-cell) {
   white-space: nowrap;
 }
@@ -4979,7 +4992,7 @@ button:disabled {
   display: inline-block;
   width: var(--activity-cell);
   height: var(--activity-cell);
-  border: 2px solid var(--accent);
+  border: 2px solid var(--text);
   border-radius: 2px;
   background: var(--border-light);
 }
@@ -5051,14 +5064,18 @@ button:disabled {
   background: var(--heat-color);
 }
 
-.heatmap-day.in-range::after {
+.heatmap-day::after {
   position: absolute;
   z-index: 1;
   inset: 0;
-  border: 2px solid var(--accent);
+  border: 2px solid transparent;
   border-radius: inherit;
   content: "";
   pointer-events: none;
+}
+
+.heatmap-day.in-range::after {
+  border-color: var(--text);
 }
 
 button.heatmap-day:hover:not(:disabled),
@@ -5067,14 +5084,21 @@ button.heatmap-day:focus-visible {
   outline: none;
 }
 
-button.heatmap-day:hover::before,
-button.heatmap-day:focus-visible::before {
-  position: absolute;
-  z-index: 2;
-  inset: 3px;
-  border: 1px solid var(--accent);
-  border-radius: 1px;
-  content: "";
+button.heatmap-day:hover:not(:disabled)::after,
+button.heatmap-day:focus-visible::after {
+  border-color: var(--accent);
+}
+
+.activity-map-tooltip {
+  position: fixed;
+  z-index: 1000;
+  width: max-content;
+  max-width: calc(100vw - 16px);
+  padding: 0.4rem 0.6rem;
+  border-radius: var(--radius);
+  background: var(--text);
+  color: var(--surface);
+  font-size: 0.8rem;
   pointer-events: none;
 }
 

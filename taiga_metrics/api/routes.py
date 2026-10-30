@@ -1004,7 +1004,7 @@ async def person_analysis(
         subject=Subject(kind="person", id=user_id),
         name=profile.name,
         tiles=flow_tiles(flow.report, share),
-        breakdown=status_rows(share.columns),
+        breakdown=status_rows(share.columns, flow.report),
         flow=flow,
     )
 

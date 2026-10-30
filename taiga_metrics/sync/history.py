@@ -1,6 +1,6 @@
 """Turning Taiga history entries into transition and assignment records.
 
-Only three facts are taken from history: status changes (including the initial status
+Facts taken from history include activity timestamps, status changes (including the initial status
 on creation and the last one on deletion), changes of the assignee set, and item
 identity (reference and subject) for items that no longer exist in Taiga.
 """
@@ -22,6 +22,9 @@ ITEM_TYPES: Final = {
 CHANGE: Final = 1
 CREATE: Final = 2
 DELETE: Final = 3
+ORDER_FIELDS: Final = frozenset(
+    {"kanban_order", "sprint_order", "backlog_order", "us_order", "taskboard_order"}
+)
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,18 @@ class HistoryEntry:
     diff: dict[str, Any]
     snapshot: dict[str, Any] | None
     values: dict[str, Any]
+    is_hidden: bool = False
+    commented: bool = False
+    comment_deleted: bool = False
+
+    @property
+    def is_activity(self) -> bool:
+        """Whether the entry contains a visible change or a comment that still exists."""
+        return not self.is_hidden and (
+            self.type in (CREATE, DELETE)
+            or bool(set(self.diff) - ORDER_FIELDS)
+            or (self.commented and not self.comment_deleted)
+        )
 
 
 @dataclass(frozen=True)

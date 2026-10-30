@@ -22,6 +22,27 @@ def test_repeated_returns_are_events_after_each_cards_first() -> None:
     assert return_stats([1, 2]).repeat_rate == 0
 
 
+def test_person_status_breakdown_counts_the_same_stuck_cards_as_the_tiles() -> None:
+    """The status rows must not replace actual stuck counts with zero."""
+    history = [card(item, (0, 2, 6), (1, 4, 6)) for item in range(1, 4)]
+    mine = replace(
+        card(9, (0, 2, 6)), assignees=frozenset({6}), assignments=((START, frozenset({6})),)
+    )
+    report = compute_flow([*history, mine], COLUMNS, CALENDARS, OPTIONS)
+    shares = person_share(
+        [mine],
+        COLUMNS,
+        CALENDARS,
+        OPTIONS,
+        user_id=6,
+        role_id=40,
+        column_roles={2: [40]},
+        every=True,
+    )
+    rows = {row.id: row for row in status_rows(shares, report)}
+    assert rows[2].stuck == flow_tiles(report).stuck == 1
+
+
 def test_role_and_person_count_repeats_within_their_own_scope() -> None:
     """Two returns to Backend plus one to Review stay distinct in per-status rows."""
     item = replace(

@@ -333,7 +333,7 @@ export function ActivityPage({
             <div className="flow-metrics">
               <MetricCard
                 title="Over the year"
-                subtitle="Every action in Taiga's history, one square a day, for the last year up to today, reaching further back when the filter's period starts earlier; order-only changes and integration bots are left out. The selected period has a red outline. A day narrows the numbers below to it; click it again to go back."
+                subtitle="Every action in Taiga's history, one square a day, for the last year up to today, reaching further back when the filter's period starts earlier; order-only changes and integration bots are left out. The selected period has a dark gray outline; hover a day for its date and action count. A day narrows the numbers below to it; click it again to go back."
               >
                 <div className="metric-chart activity-map-chart">
                   <ActivityMap

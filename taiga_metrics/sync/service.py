@@ -17,7 +17,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from taiga_metrics import store
 from taiga_metrics.sync import reader
-from taiga_metrics.sync.history import parse_entry
+from taiga_metrics.sync.history import parse_entry, parse_key
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -215,13 +215,13 @@ class SyncService:
                 await upsert_items(target, items)
                 since = await read_since(target, self.overlap)
                 history_read = transitions_added = assignments_added = 0
-                watermark: datetime | None = None
+                watermark = since + self.overlap if since is not None else None
                 async for batch in reader.stream_history(source, since):
                     history_read += len(batch)
                     added = await store_batch(target, batch)
                     transitions_added += added[0]
                     assignments_added += added[1]
-                    watermark = batch[-1].created_at
+                    watermark = max(filter(None, (watermark, batch[-1].created_at)))
                 await mark_missing_items(target, items)
                 await fill_created_at(target)
                 for statement in (*FILL_STATUS_NAMES, *FILL_NAMES_FROM_HISTORY):
@@ -359,7 +359,20 @@ async def store_batch(target: AsyncConnection, batch: Sequence[HistoryEntry]) ->
     transitions: list[Transition] = []
     assignments: list[Assignment] = []
     deleted: list[DeletedItem] = []
+    activity = []
     for entry in batch:
+        key = parse_key(entry.key)
+        if key is not None:
+            activity.append(
+                {
+                    "history_id": entry.id,
+                    "item_type": key[0],
+                    "item_id": key[1],
+                    "project_id": entry.project_id,
+                    "happened_at": entry.created_at,
+                    "is_activity": entry.is_activity,
+                }
+            )
         parsed = parse_entry(entry)
         if parsed.transition is not None:
             transitions.append(parsed.transition)
@@ -375,6 +388,15 @@ async def store_batch(target: AsyncConnection, batch: Sequence[HistoryEntry]) ->
         store.assignment,
         [{**asdict(a), "assignee_ids": list(a.assignee_ids)} for a in assignments],
     )
+    if activity:
+        statement = pg_insert(store.card_activity)
+        await target.execute(
+            statement.on_conflict_do_update(
+                index_elements=["history_id"],
+                set_={"is_activity": statement.excluded.is_activity},
+            ),
+            activity,
+        )
     await store_deleted(target, deleted)
     return added_transitions, added_assignments
 

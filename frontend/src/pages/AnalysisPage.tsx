@@ -382,7 +382,7 @@ export function AnalysisPage({
                 <>
                   <MetricCard
                     title="Stuck now"
-                    subtitle="Unfinished cards in a Work status longer than 85% of the past stays there, the longest first. Act on these first."
+                    subtitle="Cards in Work overdue by age since creation or total time in their current status, including earlier visits. Each measure uses the project's whole history and at least 3 completed card observations."
                   >
                     {stuck.length === 0 ? <Empty>Nothing is stuck.</Empty> : stuckList(stuck)}
                   </MetricCard>

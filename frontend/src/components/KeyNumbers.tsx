@@ -33,7 +33,7 @@ const METRICS: Metric[] = [
   {
     count: "stuck",
     label: () => "Stuck",
-    hint: "Unfinished cards in a Work status longer than 85% of the past stays there",
+    hint: "Unfinished cards in Work whose age or cumulative time in their current status exceeds the project's historical p85; at least 3 completed card observations per measure",
     value: (tiles) => formatNumber(tiles.stuck),
     raw: (tiles) => tiles.stuck,
   },

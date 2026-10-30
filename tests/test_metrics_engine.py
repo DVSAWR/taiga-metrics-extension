@@ -16,13 +16,13 @@ from taiga_metrics.metrics.engine import (
     FlowOptions,
     PersonMoves,
     Step,
+    aging_thresholds,
     card_report,
     compute_flow,
     finish_time,
     intervals_of,
     stay_level,
     stays_of,
-    usual_stays,
     with_levels,
 )
 from taiga_metrics.metrics.returns import ReturnRules
@@ -394,11 +394,137 @@ def test_stuck_is_judged_against_the_whole_history() -> None:
     doing = card(9, (0, DOING, 5), assignees=frozenset({5}))
     alone = compute_flow([doing], COLUMNS, CALENDARS, options(now_days=10))
     assert alone.stuck[0].level is None
-    usual = usual_stays([*history, doing], CALENDARS, options(now_days=10))
+    aging = aging_thresholds([*history, doing], TYPES, CALENDARS, options(now_days=10))
     judged = compute_flow(
-        [doing], COLUMNS, CALENDARS, dataclasses.replace(options(now_days=10), usual=usual)
+        [doing], COLUMNS, CALENDARS, dataclasses.replace(options(now_days=10), aging=aging)
     )
     assert judged.stuck[0].level == "red"
+
+
+def test_stuck_adds_previous_visits_without_resetting_on_reentry() -> None:
+    """A short latest stay cannot hide earlier time spent in the same status."""
+    history = [card(item, (0, DOING, 5), (5, REVIEW, 5)) for item in range(1, 4)]
+    returned = card(9, (0, DOING, 5), (8, NEW, 5), (9, DOING, 5))
+    report = compute_flow([*history, returned], COLUMNS, CALENDARS, options(now_days=10))
+    current = next(item for item in report.stuck if item.item_id == 9)
+    assert current.days_in_column == 1
+    assert current.days_in_status == 9
+    assert current.age_days == 10
+    assert current.p85 == 5
+    assert current.status_level == current.level == "red"
+
+
+def test_status_baseline_adds_visits_once_per_completed_card() -> None:
+    """Compare a total with per-card totals, excluding cards still in that status."""
+    history = [
+        card(item, (0, DOING, 5), (3, REVIEW, 5), (4, DOING, 5), (7, REVIEW, 5))
+        for item in range(1, 4)
+    ]
+    returned = card(9, (0, DOING, 5), (5, NEW, 5), (9, DOING, 5))
+    report = compute_flow([*history, returned], COLUMNS, CALENDARS, options(now_days=10))
+    current = next(item for item in report.stuck if item.item_id == 9)
+    assert current.days_in_status == current.p85 == 6
+    assert current.status_level is None
+
+
+def test_repeated_visits_do_not_replace_three_distinct_baseline_cards() -> None:
+    """Many exits by one card are one completed cumulative observation."""
+    history = card(
+        1,
+        (0, DOING, 5),
+        (1, REVIEW, 5),
+        (2, DOING, 5),
+        (3, REVIEW, 5),
+        (4, DOING, 5),
+        (5, REVIEW, 5),
+    )
+    report = compute_flow(
+        [history, card(9, (0, DOING, 5))], COLUMNS, CALENDARS, options(now_days=30)
+    )
+    current = next(item for item in report.stuck if item.item_id == 9)
+    assert current.p85 is None
+    assert current.level is None
+
+
+def test_age_detects_old_work_after_a_recent_status_change() -> None:
+    """Creation age is compared with completed creation-to-finish ages."""
+    history = [card(item, (1, DOING, 5), (5, DONE, 5)) for item in range(1, 4)]
+    old = card(9, (9, DOING, 5))
+    report = compute_flow([*history, old], COLUMNS, CALENDARS, options(now_days=10))
+    current = next(item for item in report.stuck if item.item_id == 9)
+    assert current.days_in_status == 1
+    assert current.age_days == 10
+    assert current.age_p85 == 5
+    assert current.status_level is None
+    assert current.age_level == current.level == "red"
+
+
+def test_working_age_and_cumulative_status_time_skip_days_off() -> None:
+    """Age and status totals use their matching working-day baselines."""
+    history = [card(item, (0, DOING, 5), (1, DONE, 5)) for item in range(1, 4)]
+    returned = card(9, (0, DOING, 5), (4, NEW, 5), (6, DOING, 5))
+    current = next(
+        item
+        for item in compute_flow(
+            [*history, returned], COLUMNS, CALENDARS, options(now_days=7, working=True)
+        ).stuck
+        if item.item_id == 9
+    )
+    assert current.age_days == 5
+    assert current.calendar_age_days == 7
+    assert current.days_in_status == pytest.approx(4 + 9 / 24)
+    assert current.days_in_column == pytest.approx(9 / 24)
+    assert current.p85 == current.age_p85 == 1
+
+
+def test_assignment_does_not_reset_card_aging() -> None:
+    """Every current assignee sees the same card age, cumulative time and level."""
+    history = [card(item, (0, DOING, 5), (1, DONE, 5)) for item in range(1, 4)]
+    doing = dataclasses.replace(
+        card(9, (0, DOING, 5), assignees=frozenset({6})), assignments=((at(9), frozenset({6})),)
+    )
+    aging = aging_thresholds([*history, doing], TYPES, CALENDARS, options(now_days=10))
+    project = compute_flow(
+        [doing], COLUMNS, CALENDARS, dataclasses.replace(options(now_days=10), aging=aging)
+    ).stuck[0]
+    personal = compute_flow(
+        [doing], COLUMNS, CALENDARS, dataclasses.replace(for_people(6, now_days=10), aging=aging)
+    ).stuck[0]
+    assert (
+        (personal.age_days, personal.days_in_status, personal.level)
+        == (project.age_days, project.days_in_status, project.level)
+        == (10, 10, "red")
+    )
+
+
+def test_idle_counts_visible_activity_and_ignores_future_activity() -> None:
+    """Past reports select the last activity known then, rather than today's maximum."""
+    doing = dataclasses.replace(
+        card(1, (1, DOING, 5), last_activity=at(9)), activity=(at(3), at(9))
+    )
+    report = compute_flow(
+        [doing], COLUMNS, CALENDARS, dataclasses.replace(options(now_days=10), until=at(7))
+    )
+    assert report.stuck[0].days_idle == 1
+    assert report.stuck_at_end[0].days_idle == 4
+    assert report.stuck_at_end[0].age_days == 7
+
+
+def test_future_completed_work_cannot_change_past_stuck_classification() -> None:
+    """A completion after the reporting cutoff cannot set a historical threshold."""
+    history = [card(item, (0, DOING, 5), (1, REVIEW, 5)) for item in range(1, 4)]
+    future = card(8, (0, DOING, 5), (25, DONE, 5))
+    old = card(9, (0, DOING, 5))
+    report = compute_flow(
+        [*history, future, old],
+        COLUMNS,
+        CALENDARS,
+        dataclasses.replace(options(now_days=30), until=at(10)),
+    )
+    assert next(item for item in report.stuck if item.item_id == 9).p85 == 25
+    past = next(item for item in report.stuck_at_end if item.item_id == 9)
+    assert past.p85 == 1
+    assert past.level == "red"
 
 
 def test_only_cards_in_work_columns_can_be_stuck() -> None:
@@ -555,7 +681,7 @@ def test_stuck_and_in_progress_follow_current_assignees() -> None:
     assert not any(card.now for card in previous.column_cards)
     report = compute_flow([doing], COLUMNS, CALENDARS, for_people(6, now_days=10))
     assert report.in_progress == 1
-    assert report.stuck[0].days_in_column == pytest.approx(8)
+    assert report.stuck[0].days_in_column == pytest.approx(9)
     assert report.stuck[0].days_idle == pytest.approx(8)
 
 
@@ -568,14 +694,14 @@ def test_new_coassignee_gets_only_idle_time_since_assignment() -> None:
     project = compute_flow([doing], COLUMNS, CALENDARS, options(now_days=10))
     first = compute_flow([doing], COLUMNS, CALENDARS, for_people(5, now_days=10))
     added = compute_flow([doing], COLUMNS, CALENDARS, for_people(6, now_days=10))
-    assert (project.stuck[0].days_in_column, project.stuck[0].days_idle) == (9, 8)
-    assert (first.stuck[0].days_in_column, first.stuck[0].days_idle) == (9, 8)
-    assert (added.stuck[0].days_in_column, added.stuck[0].days_idle) == (2, 2)
+    assert (project.stuck[0].days_in_column, project.stuck[0].days_idle) == (9, 2)
+    assert (first.stuck[0].days_in_column, first.stuck[0].days_idle) == (9, 2)
+    assert (added.stuck[0].days_in_column, added.stuck[0].days_idle) == (9, 2)
     assert next(row for row in added.column_cards if row.now).days == 2
     at_period_end = dataclasses.replace(for_people(6, now_days=10), until=at(9))
     historical = compute_flow([doing], COLUMNS, CALENDARS, at_period_end)
     assert (historical.stuck_at_end[0].days_in_column, historical.stuck_at_end[0].days_idle) == (
-        1,
+        8,
         1,
     )
 

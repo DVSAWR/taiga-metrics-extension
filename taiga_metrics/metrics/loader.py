@@ -25,6 +25,9 @@ from taiga_metrics.metrics.engine import (
     Stay,
     StayLevel,
     Step,
+    StuckCard,
+    aging_as_of,
+    aging_thresholds,
     card_report,
     compute_flow,
     finish_samples,
@@ -169,6 +172,7 @@ class CardFlow(BaseModel):
     columns: list[ColumnRef]
     people: dict[int, str]
     usernames: dict[int, str] = {}
+    aging: StuckCard | None = None
 
 
 class ColumnRef(BaseModel):
@@ -646,15 +650,20 @@ TRANSITIONS = text(
     """
 )
 
-LAST_ACTIVITY = text(
+ACTIVITY = text(
     """
-    select item_id, max(happened_at) as last_activity from (
-        select item_id, happened_at from transition
+    select item_id, happened_at from (
+        select item_id, happened_at from card_activity
+         where project_id = :project_id and item_type = :item_type and is_activity
+        union
+        select item_id, happened_at from transition t
          where project_id = :project_id and item_type = :item_type
-        union all
-        select item_id, happened_at from assignment
+           and not exists (select 1 from card_activity a where a.history_id = t.history_id)
+        union
+        select item_id, happened_at from assignment t
          where project_id = :project_id and item_type = :item_type
-    ) events group by item_id
+           and not exists (select 1 from card_activity a where a.history_id = t.history_id)
+    ) events order by item_id, happened_at
     """
 )
 
@@ -968,8 +977,9 @@ class StoredFlowData:
         calendars = await self.calendars(connection, project_id)
         roles_of = await self.member_roles(connection, project_id) if people else {}
         rules, misclick = await self.return_options(connection, project_id, item_type)
-        usual = usual_stays(
+        aging = aging_thresholds(
             everything,
+            {column.status_id: column.type for column in columns},
             calendars,
             FlowOptions(now=now, since=None, working_days=period.working, misclick=misclick),
         )
@@ -985,7 +995,21 @@ class StoredFlowData:
                 people=people,
                 roles_of=roles_of,
                 column=column,
-                usual=usual,
+                aging=aging,
+                aging_at_end=aging_as_of(
+                    everything,
+                    {column.status_id: column.type for column in columns},
+                    calendars,
+                    FlowOptions(
+                        now=now,
+                        since=period.since,
+                        until=period.until,
+                        working_days=period.working,
+                        misclick=misclick,
+                    ),
+                )
+                if period.until is not None and period.until < now
+                else aging,
                 returns=rules,
                 misclick=misclick,
             ),
@@ -1011,10 +1035,9 @@ class StoredFlowData:
         assignments: dict[int, list[tuple[datetime, frozenset[int]]]] = defaultdict(list)
         for row in await connection.execute(ASSIGNMENTS, params):
             assignments[row.item_id].append((row.happened_at, frozenset(row.assignee_ids)))
-        activity = {
-            row.item_id: row.last_activity
-            for row in await connection.execute(LAST_ACTIVITY, params)
-        }
+        activity: dict[int, list[datetime]] = defaultdict(list)
+        for row in await connection.execute(ACTIVITY, params):
+            activity[row.item_id].append(row.happened_at)
         allowed = None if item_ids is None else set(item_ids)
         cards = [
             Card(
@@ -1026,7 +1049,8 @@ class StoredFlowData:
                 is_deleted=row.is_deleted,
                 steps=tuple(steps.get(row.id, ())),
                 assignees=current_assignees(assignments.get(row.id, ())),
-                last_activity=activity.get(row.id),
+                last_activity=activity[row.id][-1] if activity[row.id] else None,
+                activity=tuple(activity[row.id]),
                 assignments=tuple(assignments.get(row.id, ())),
                 owner_id=row.owner_id,
             )
@@ -1206,11 +1230,30 @@ class StoredFlowData:
                 FlowOptions(now=now, since=None, working_days=working, misclick=misclick),
             )
             report = replace(report, stays=with_levels(report.stays, tuple(usual.values())))
+            observed = next((item for item in everything if item.item_id == item_id), card)
+            aging_options = FlowOptions(
+                now=now, since=None, working_days=working, misclick=misclick
+            )
+            current = compute_flow(
+                [observed],
+                columns,
+                calendars,
+                replace(
+                    aging_options,
+                    aging=aging_thresholds(
+                        everything,
+                        {column.status_id: column.type for column in columns},
+                        calendars,
+                        aging_options,
+                    ),
+                ),
+            ).stuck
             found = await self.people(
                 connection, {stay.exited_by for stay in report.stays if stay.exited_by is not None}
             )
         used = {stay.status_id for stay in report.stays} | {row.status_id}
         return CardFlow(
+            aging=current[0] if current else None,
             item_type=item_type,
             item_id=row.id,
             ref=row.ref,
@@ -1628,14 +1671,37 @@ class StoredFlowData:
         params = {"project_id": project_id, "item_type": item_type}
         now = datetime.now(UTC)
         async with self.engine.connect() as connection:
-            columns, cards = await self.cards(connection, params, item_ids)
+            columns, everything = await self.cards(connection, params)
+            allowed = None if item_ids is None else set(item_ids)
+            cards = (
+                everything
+                if allowed is None
+                else [card for card in everything if card.item_id in allowed]
+            )
             calendars = await self.calendars(connection, project_id)
             roles_of = await self.member_roles(connection, project_id)
             rules, misclick = await self.return_options(connection, project_id, item_type)
-            usual = usual_stays(
-                cards,
+            aging = aging_thresholds(
+                everything,
+                {column.status_id: column.type for column in columns},
                 calendars,
                 FlowOptions(now=now, since=None, working_days=period.working, misclick=misclick),
+            )
+            historical = (
+                aging_as_of(
+                    everything,
+                    {column.status_id: column.type for column in columns},
+                    calendars,
+                    FlowOptions(
+                        now=now,
+                        since=period.since,
+                        until=period.until,
+                        working_days=period.working,
+                        misclick=misclick,
+                    ),
+                )
+                if period.until is not None and period.until < now
+                else aging
             )
             found = await self.people(connection, set(users))
         summaries = []
@@ -1653,7 +1719,8 @@ class StoredFlowData:
                 working_days=period.working,
                 people=AssignmentFilter(people=frozenset({user})),
                 roles_of=roles_of,
-                usual=usual,
+                aging=aging,
+                aging_at_end=historical,
                 returns=rules,
                 misclick=misclick,
             )

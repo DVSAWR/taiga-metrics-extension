@@ -10,6 +10,16 @@ Taiga Metrics is an extension that runs next to your Taiga. It never changes Tai
 - Included tags must all be present on a card. Other values within one filter category are alternatives; categories are combined, and any excluded value removes a card. The same selection applies to Overview, Roles, People, Activity, Trends, Search, History, personal achievements and their card lists. Filters are remembered per project and kept when navigating between these pages.
 - Data is copied from Taiga every hour (configurable). You can also start a copy by hand.
 
+Stuck cards are unfinished cards in Work statuses whose age since creation or total
+time in their current status exceeds the historical p85 (Slower) or p95 (Much slower).
+Status time adds every visit, so moving out and back does not reset it. Age is compared
+with completed creation-to-finish ages; status totals are compared with per-card totals
+of cards that have left that status. Each comparison needs at least three distinct
+cards. Project-wide thresholds are calculated before filtering. Historical reports use
+only the history available by their cutoff. The lists show age, total status time,
+the current stay, the reason for the warning and inactivity since the latest visible
+change or comment. Working-day age follows the project calendar.
+
 > Taiga Metrics is an independent open-source project. It is not affiliated with, endorsed by or supported by Taiga or Kaleidos Inc. Taiga is a trademark of its owners and is named here only to say what this extension works with.
 
 ## Contents
@@ -196,6 +206,11 @@ curl -fsSLO https://github.com/DVSAWR/taiga-metrics-extension/releases/latest/do
 ```
 
 Database changes are applied on start. Your settings in `taiga-metrics.env` and the extension's data are kept. The list of changes is on the [releases page](https://github.com/DVSAWR/taiga-metrics-extension/releases).
+
+When upgrading from 0.2.1 or earlier to 0.2.2, the first sync replays card history to
+include visible edits and comments in inactivity. It starts automatically and can
+take longer than a normal hourly sync. Stuck counts can increase because previous
+visits to a status and the card's age are now included.
 
 To run a specific version, set `TAIGA_METRICS_VERSION=1.2.0` in `taiga-metrics.env` and run `./taiga-metrics.sh update`.
 

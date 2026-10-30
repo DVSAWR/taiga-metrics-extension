@@ -93,11 +93,16 @@ ITEMS = text(
 
 HISTORY = text(
     """
-    select id, key, type, "user", created_at, project_id, diff, snapshot, "values"
+    select id, key, type, "user", created_at, project_id, diff, snapshot, "values",
+           coalesce(is_hidden, false) as is_hidden,
+           coalesce(comment, '') <> '' as commented,
+           delete_comment_date is not null as comment_deleted
       from history_historyentry
      where key ~ '^(userstories\\.userstory|tasks\\.task|issues\\.issue|epics\\.epic):[0-9]+$'
-       and (type in (2, 3) or diff ?| array['status', 'assigned_users', 'assigned_to'])
-       and (cast(:since as timestamptz) is null or created_at > cast(:since as timestamptz))
+       and (cast(:since as timestamptz) is null
+            or created_at > cast(:since as timestamptz)
+            or edit_comment_date > cast(:since as timestamptz)
+            or delete_comment_date > cast(:since as timestamptz))
      order by created_at, id
     """
 )
@@ -142,6 +147,9 @@ def to_entry(row: dict[str, Any]) -> HistoryEntry:
         diff=decode_json(row["diff"]) or {},
         snapshot=decode_json(row["snapshot"]),
         values=decode_json(row["values"]) or {},
+        is_hidden=bool(row.get("is_hidden", False)),
+        commented=bool(row.get("commented", False)),
+        comment_deleted=bool(row.get("comment_deleted", False)),
     )
 
 

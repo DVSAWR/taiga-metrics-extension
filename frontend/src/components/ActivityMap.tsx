@@ -1,4 +1,5 @@
-import { useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 
 import type { ActivityKind } from "../api";
 import { formatNumber } from "../format";
@@ -121,6 +122,43 @@ export function ActivityMap({
   const weeks = Math.ceil(shown.length / 7);
   const scroller = useRef<HTMLDivElement>(null);
   const [cellSize, setCellSize] = useState(18);
+  const tooltipId = useId();
+  const tooltip = useRef<HTMLDivElement>(null);
+  const [hint, setHint] = useState<{
+    day: string;
+    label: string;
+    left: number;
+    top: number;
+    bottom: number;
+  } | null>(null);
+  const showHint = (day: string, label: string, button: HTMLButtonElement) => {
+    const rect = button.getBoundingClientRect();
+    setHint({ day, label, left: rect.left + rect.width / 2, top: rect.top, bottom: rect.bottom });
+  };
+  useLayoutEffect(() => {
+    const element = tooltip.current;
+    if (!hint || !element) return;
+    const rect = element.getBoundingClientRect();
+    element.style.left = `${Math.max(
+      8,
+      Math.min(hint.left - rect.width / 2, window.innerWidth - rect.width - 8),
+    )}px`;
+    element.style.top = `${
+      hint.bottom + 8 + rect.height <= window.innerHeight - 8
+        ? hint.bottom + 8
+        : hint.top - rect.height - 8
+    }px`;
+  }, [hint]);
+  useEffect(() => {
+    if (!hint) return;
+    const clear = () => setHint(null);
+    window.addEventListener("scroll", clear, true);
+    window.addEventListener("resize", clear);
+    return () => {
+      window.removeEventListener("scroll", clear, true);
+      window.removeEventListener("resize", clear);
+    };
+  }, [hint]);
   useLayoutEffect(() => {
     const element = scroller.current;
     if (!element) return;
@@ -165,6 +203,9 @@ export function ActivityMap({
             <div className="heatmap">
               {shown.map((day) => {
                 const count = counts.get(day) ?? 0;
+                const label = `${day}: ${formatNumber(count)} ${
+                  count === 1 ? "action" : "actions"
+                }`;
                 return (
                   <button
                     key={day}
@@ -172,7 +213,16 @@ export function ActivityMap({
                     className={`heatmap-day level-${levelOf(count)}${
                       selected === day ? " selected" : ""
                     }${hasSelectedPeriod && inRange(day) ? " in-range" : ""}`}
-                    title={`${day}: ${formatNumber(count)} ${count === 1 ? "action" : "actions"}`}
+                    aria-label={label}
+                    aria-pressed={selected === day}
+                    aria-describedby={hint?.day === day ? tooltipId : undefined}
+                    onPointerEnter={(event) => showHint(day, label, event.currentTarget)}
+                    onPointerLeave={() => setHint(null)}
+                    onFocus={(event) => showHint(day, label, event.currentTarget)}
+                    onBlur={() => setHint(null)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") setHint(null);
+                    }}
                     onClick={() => onSelect(selected === day ? null : day)}
                   />
                 );
@@ -194,6 +244,19 @@ export function ActivityMap({
           </div>
         </div>
       </div>
+      {hint &&
+        createPortal(
+          <div
+            ref={tooltip}
+            id={tooltipId}
+            role="tooltip"
+            className="activity-map-tooltip"
+            style={{ left: hint.left, top: hint.bottom + 8 }}
+          >
+            {hint.label}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

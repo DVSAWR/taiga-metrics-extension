@@ -33,7 +33,8 @@ function fromStuck(card: StuckCard): ListedCard {
     ref: card.ref,
     subject: card.subject,
     status_id: card.status_id,
-    days: card.days_in_column,
+    days: card.days_in_status,
+    aging: card,
     assignees: card.assignees,
   };
 }
@@ -130,7 +131,7 @@ export function subjectCards(
   if (kind === "stuck") {
     return {
       title: "Stuck now",
-      timeLabel: "In the status",
+      timeLabel: "Total in status",
       cards: report.stuck
         .filter((card) => card.level && inside(statuses, card.status_id))
         .map(fromStuck),

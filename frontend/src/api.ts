@@ -945,6 +945,13 @@ export interface StuckCard {
   subject: string;
   status_id: number;
   days_in_column: number;
+  days_in_status: number;
+  age_days: number | null;
+  calendar_age_days: number | null;
+  age_p85: number | null;
+  age_p95: number | null;
+  status_level: "red" | "yellow" | null;
+  age_level: "red" | "yellow" | null;
   days_idle: number | null;
   level: "red" | "yellow" | null;
   p85: number | null;
@@ -1063,6 +1070,7 @@ export interface ColumnRef {
 }
 
 export interface CardFlow {
+  aging: StuckCard | null;
   item_type: ItemType;
   item_id: number;
   ref: number | null;

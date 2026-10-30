@@ -30,6 +30,7 @@ import { cardsPath, columnPath, projectPath } from "../router";
 import { DonutSplit, Empty, MetricCard, type Slice } from "./FlowMetrics";
 import { TransitionsTable } from "./HistoryTab";
 import { NotFoundPage } from "./HomePage";
+import { AgingBadges } from "../components/AgingBadges";
 
 const HISTORY_LIMIT = 1000;
 const NEUTRAL = "#a9aabc";
@@ -366,6 +367,23 @@ export function CardPage({
                 report.finished_at ? `finished ${formatDateTime(report.finished_at)}` : undefined
               }
             />
+            {card.aging && (
+              <StatTile
+                label="Age"
+                value={formatDuration(card.aging.calendar_age_days)}
+                detail={
+                  <>
+                    {card.aging.age_days !== card.aging.calendar_age_days && (
+                      <span className="aging-baseline">
+                        {formatDuration(card.aging.age_days)} working
+                      </span>
+                    )}
+                    <AgingBadges card={card.aging} />
+                  </>
+                }
+                title="Calendar age from creation to now. Working-day age follows the project calendar; status aging adds every visit to the current status."
+              />
+            )}
             <StatTile
               label="Cycle time"
               value={report.finished_at ? formatDuration(report.cycle_days) : "-"}

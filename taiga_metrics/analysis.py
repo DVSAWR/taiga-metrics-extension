@@ -13,6 +13,7 @@ by people, a person by the columns they worked in.
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field
@@ -187,8 +188,13 @@ def people_rows(
     return sorted(rows, key=lambda row: (not row.member, row.name.lower()))
 
 
-def status_rows(columns: Sequence[ColumnShare]) -> list[Row]:
+def status_rows(columns: Sequence[ColumnShare], report: FlowReport | None = None) -> list[Row]:
     """A person's columns as lines, in Taiga's order."""
+    stuck = (
+        Counter(card.status_id for card in report.stuck if card.level)
+        if report
+        else Counter[int]()
+    )
     return [
         Row(
             kind="status",
@@ -196,7 +202,7 @@ def status_rows(columns: Sequence[ColumnShare]) -> list[Row]:
             name=column.name,
             color=column.color,
             in_now=column.person_now,
-            stuck=0,
+            stuck=stuck[column.status_id],
             done=column.person_stays,
             p50=column.person_p50,
             share=column.share,

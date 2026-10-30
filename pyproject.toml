@@ -7,7 +7,7 @@ requires = [
 
 [project]
 name = "taiga-metrics"
-version = "0.2.1"
+version = "0.2.2"
 description = "Flow and team metrics for self-hosted Taiga, read directly from its database"
 authors = [
     {name = "Daniil Gruzdev", email = "gruzdev.daniil@gmail.com"}

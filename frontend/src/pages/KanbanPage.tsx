@@ -11,12 +11,11 @@ import {
 } from "../api";
 import { formatDuration } from "../charts/format";
 import { StatTile } from "../charts/StatTile";
-import { CardTitle } from "../components/CardTitle";
 import { FilterPanel } from "../components/FilterPanel";
-import { PeopleRefs, PersonRef } from "../components/PersonLink";
+import { PersonRef } from "../components/PersonLink";
 import { MetricList } from "../components/MetricList";
 import { MetricPopup } from "../components/MetricPopup";
-import { StuckBadge } from "../components/StayBadge";
+import { StuckList } from "../components/StuckList";
 import { TextLink } from "../components/TextLink";
 import { SwimlaneSelect, useSwimlanes } from "../components/SwimlaneSelect";
 import { useFilterSelection, usePeriod } from "../filterState";
@@ -327,70 +326,20 @@ export function ColumnPage({
 
               <MetricCard
                 title="Cards in the status now"
-                subtitle={
-                  <>
-                    How long each card has been here. <StuckBadge level="yellow" /> means longer
-                    than 85% of past stays, <StuckBadge level="red" /> longer than 95%.
-                  </>
-                }
+                subtitle="Age since creation, total time across all visits to this status, and the current stay. Work cards are overdue when age or total status time exceeds the historical p85; the stronger level exceeds p95."
               >
                 {report.current.length === 0 ? (
                   <Empty>No card is in this status now.</Empty>
                 ) : (
-                  <table className="table stuck-table">
-                    <colgroup>
-                      <col />
-                      <col className="col-people" />
-                      <col className="col-people" />
-                      <col className="col-time" />
-                      <col className="col-time" />
-                      <col className="col-level" />
-                    </colgroup>
-                    <thead>
-                      <tr>
-                        <th>Card</th>
-                        <th>Assigned</th>
-                        <th>Created by</th>
-                        <th className="num">In status</th>
-                        <th className="num" title="Time since the last move or assignee change">
-                          No activity
-                        </th>
-                        <th />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {report.current.map((card) => (
-                        <tr key={card.item_id}>
-                          <td className="truncate" title={card.subject}>
-                            <CardTitle
-                              slug={slug}
-                              itemType={itemType}
-                              itemId={card.item_id}
-                              cardRef={card.ref}
-                              subject={card.subject}
-                              isDeleted={false}
-                              taigaUrl={taigaUrl}
-                            />
-                          </td>
-                          <td className="truncate">
-                            <PeopleRefs
-                              directory={flow}
-                              ids={card.assignees}
-                              nobody="Unassigned"
-                            />
-                          </td>
-                          <td className="nowrap">
-                            <PersonRef directory={flow} id={card.created_by} nobody="Unknown" />
-                          </td>
-                          <td className="num">{formatDuration(card.days_in_column)}</td>
-                          <td className="num">{formatDuration(card.days_idle)}</td>
-                          <td className="nowrap">
-                            <StuckBadge level={card.level} />
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                  <StuckList
+                    slug={slug}
+                    itemType={itemType}
+                    cards={report.current}
+                    columns={report.columns}
+                    directory={flow}
+                    taigaUrl={taigaUrl}
+                    showCreatedBy
+                  />
                 )}
               </MetricCard>
 
